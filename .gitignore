@@ -115,3 +115,11 @@ coverage/
 tmp/
 temp/
 package-lock.json
+#Python exclusions
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
