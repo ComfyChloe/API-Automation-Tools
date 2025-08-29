@@ -2,9 +2,11 @@
   "name": "api-automation-tools",
   "version": "1.0.0",
   "description": "API automation tools",
+  "type": "module",
   "main": "",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "auth": "node VRC-API-JavaScript/Simple-Auth-Nocookie.js"
   },
   "keywords": [
     "api",
