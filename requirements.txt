@@ -1,0 +1,3 @@
+vrchatapi>=1.4.0
+requests>=2.25.0
+websocket-client>=1.0.0
