@@ -8,10 +8,53 @@ import json
 import os
 import random
 import getpass
+import sys
 from http.cookiejar import Cookie
 # Configuration files
 COOKIE_FILE = ".vrchat_cookies.json"
 CONFIG_FILE = "group_viewer_config.json"
+def getpass_asterisk(prompt="Password: "):
+    """Get password input with asterisk masking"""
+    print(prompt, end='', flush=True)
+    password = ""
+    # For Windows
+    if sys.platform == 'win32':
+        import msvcrt
+        while True:
+            char = msvcrt.getch()
+            if char in [b'\r', b'\n']:  # Enter key
+                print()  # New line
+                break
+            elif char == b'\x08':  # Backspace
+                if len(password) > 0:
+                    password = password[:-1]
+                    print('\b \b', end='', flush=True)  # Erase the asterisk
+            else:
+                password += char.decode('utf-8', errors='ignore')
+                print('*', end='', flush=True)
+    else:
+        # For Unix/Linux/Mac - fallback to getpass if needed
+        import termios
+        import tty
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+        try:
+            tty.setraw(sys.stdin.fileno())
+            while True:
+                char = sys.stdin.read(1)
+                if char in ['\r', '\n']:
+                    print()
+                    break
+                elif char == '\x7f':  # Backspace
+                    if len(password) > 0:
+                        password = password[:-1]
+                        print('\b \b', end='', flush=True)
+                else:
+                    password += char
+                    print('*', end='', flush=True)
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+    return password
 # Function to handle retries with exponential backoff
 def retry_with_backoff(func, max_retries=5, initial_delay=1):
     retries = 0
@@ -82,7 +125,7 @@ def main():
     if not auth_value:
         print("Please enter your VRChat credentials:")
         username = input("Username: ")
-        password = getpass.getpass("Password: ")
+        password = getpass_asterisk("Password: ")
         print("Credentials entered. Attempting to authenticate...")
     else:
         print("Found stored authentication, attempting to use saved session...")
@@ -224,21 +267,63 @@ def main():
         save_config(auth_value, twofa_value, group_id)
         print(f"\nViewing group instances for {group_id}")
         print("Refreshing every 90 seconds. Press Ctrl+C to stop.")
-        print("Format: InstanceID :: World name :: Player count")
-        print("-" * 60)
+        print("Displays: Group info + Instance locations with parsed details")
+        print("-" * 70)
         # Function to fetch and display group instances
         def fetch_and_display_instances():
             try:
+                # First, get group information
+                group_info = groups_api_instance.get_group(group_id=group_id, include_roles=False)
+                group_name = getattr(group_info, 'name', 'Unknown Group')
+                group_member_count = getattr(group_info, 'member_count', 0)
+                group_join_state = getattr(group_info, 'join_state', 'Unknown')
+                
+                # Get group instances
                 instances = groups_api_instance.get_group_instances(group_id=group_id)
+                
+                # Display group information header
+                print(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] Group: {group_name} ({group_id})")
+                print(f"Group Members: {group_member_count} | Join State: {group_join_state}")
+                
                 if not instances:
-                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] No instances found for this group.")
-                    return
-                print(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] Found {len(instances)} instance(s):")
+                    print(f"No instances found for this group.")
+                    return True
+                
+                print(f"Found {len(instances)} instance(s):")
+                print("-" * 70)
                 for instance in instances:
                     # Extract instance information
                     instance_id = getattr(instance, 'instance_id', 'Unknown')
                     world_name = "Unknown World"
-                    player_count = getattr(instance, 'n_users', 0)
+                    
+                    # Convert instance to dict to access all fields correctly
+                    if hasattr(instance, 'to_dict'):
+                        instance_dict = instance.to_dict()
+                        player_count = instance_dict.get('memberCount', instance_dict.get('member_count', 0))
+                        # Extract capacity/max users
+                        capacity = instance_dict.get('capacity', instance_dict.get('maxUsers', instance_dict.get('max_users', 'Unknown')))
+                        # Get location which contains the full world:instance format
+                        location = instance_dict.get('location', instance_id)
+                    else:
+                        # Fallback for direct attribute access
+                        player_count = getattr(instance, 'memberCount', getattr(instance, 'member_count', getattr(instance, 'n_users', 0)))
+                        capacity = getattr(instance, 'capacity', getattr(instance, 'maxUsers', getattr(instance, 'max_users', 'Unknown')))
+                        location = getattr(instance, 'location', instance_id)
+                    
+                    # Parse the location/instance_id to extract information
+                    age_gate = 'ageGate' in location if location else False
+                    region = 'Unknown'
+                    group_access_type = 'Unknown'
+                    
+                    if location and '~' in location:
+                        # Parse the instance ID components
+                        parts = location.split('~')
+                        for part in parts:
+                            if part.startswith('region(') and part.endswith(')'):
+                                region = part[7:-1]  # Extract content between region( and )
+                            elif part.startswith('groupAccessType(') and part.endswith(')'):
+                                group_access_type = part[16:-1]  # Extract content between groupAccessType( and )
+                    
                     # Get world information
                     if hasattr(instance, 'world'):
                         world = instance.world
@@ -246,15 +331,32 @@ def main():
                             world_name = world.get('name', 'Unknown World')
                         elif hasattr(world, 'name'):
                             world_name = world.name
-                    # Display in the requested format
-                    print(f"{instance_id} :: {world_name} :: Player count: {player_count}")
+                    
+                    # Format player count with capacity
+                    if capacity and capacity != 'Unknown':
+                        player_display = f"{player_count}/{capacity}"
+                    else:
+                        player_display = str(player_count)
+                    
+                    # Display the full location (world:instance format)
+                    print(f"{location}")
+                    # Display parsed information underneath
+                    print(f"  World: {world_name}")
+                    print(f"  Player count: {player_display}")
+                    print(f"  ageGate: {age_gate}")
+                    print(f"  Region: {region}")
+                    print(f"  Group Access Type: {group_access_type}")
+                    print()
             except ApiException as e:
-                print(f"API error when fetching instances: {e}")
+                print(f"API error when fetching group/instances: {e}")
                 if e.status == 401:
                     print("Authentication expired. Please restart the script.")
                     return False
+                elif e.status == 404:
+                    print("Group not found. Please check the Group ID.")
+                    return False
             except Exception as e:
-                print(f"Unexpected error when fetching instances: {e}")
+                print(f"Unexpected error when fetching group/instances: {e}")
                 return False
             return True
         # Main loop
