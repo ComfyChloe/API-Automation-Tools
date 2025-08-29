@@ -1,3 +1,4 @@
+# This script will auto close any instances in a specified group that are not ageGated
 import vrchatapi
 from vrchatapi.api import authentication_api, groups_api, instances_api
 from vrchatapi.exceptions import UnauthorizedException, ApiException

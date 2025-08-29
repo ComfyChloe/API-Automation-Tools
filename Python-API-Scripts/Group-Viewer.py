@@ -1,3 +1,4 @@
+# This script allows viewing of all instances in a specified VRChat group.
 import vrchatapi
 from vrchatapi.api import authentication_api, groups_api
 from vrchatapi.exceptions import UnauthorizedException, ApiException
