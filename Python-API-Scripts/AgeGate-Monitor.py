@@ -1,5 +1,5 @@
 import vrchatapi
-from vrchatapi.api import authentication_api, groups_api
+from vrchatapi.api import authentication_api, groups_api, instances_api
 from vrchatapi.exceptions import UnauthorizedException, ApiException
 from vrchatapi.models.two_factor_auth_code import TwoFactorAuthCode
 from vrchatapi.models.two_factor_email_code import TwoFactorEmailCode
@@ -9,19 +9,20 @@ import os
 import random
 import getpass
 import sys
+import requests
 from http.cookiejar import Cookie
 # Configuration file (holds both cookies and config)
-CONFIG_FILE = ".vrchat_groupviewer_config.json"
-def getpass_asterisk(prompt="Password: "):
+CONFIG_FILE = ".vrchat_agegate_config.json"
+def getpass_asterisk(prompt="Password: "): 
     """Get password input with asterisk masking"""
     print(prompt, end='', flush=True)
-    password = ""
+    password = "" 
     # For Windows
     if sys.platform == 'win32':
         import msvcrt
         while True:
             char = msvcrt.getch()
-            if char in [b'\r', b'\n']:  # Enter key 
+            if char in [b'\r', b'\n']:  # Enter key
                 print()  # New line
                 break
             elif char == b'\x08':  # Backspace
@@ -80,7 +81,7 @@ def make_cookie(name, value):
                  False,
                  None,
                  None, {})
-def save_config(auth_value, twofa_value, group_id=None):
+def save_config(auth_value, twofa_value, group_id=None, total_closed=None):
     """Save both authentication cookies and configuration data to a single file"""
     data = {
         "auth": auth_value,
@@ -88,6 +89,8 @@ def save_config(auth_value, twofa_value, group_id=None):
     }
     if group_id is not None:
         data["group_id"] = group_id
+    if total_closed is not None:
+        data["total_closed"] = total_closed
     # If file exists, load existing data to preserve other settings
     if os.path.exists(CONFIG_FILE):
         try:
@@ -109,11 +112,12 @@ def load_config():
                 return (
                     data.get("auth"),
                     data.get("twoFactorAuth"),
-                    data.get("group_id")
+                    data.get("group_id"),
+                    data.get("total_closed", 0)
                 )
         except Exception:
             pass
-    return None, None, None
+    return None, None, None, 0
 def save_cookies(auth_value, twofa_value):
     """Save cookies only (wrapper for backwards compatibility)"""
     save_config(auth_value, twofa_value)
@@ -121,12 +125,59 @@ def load_cookies():
     """Load cookies only (wrapper for backwards compatibility)"""
     auth, twofa, _ = load_config()
     return auth, twofa
+def close_instance_hard(full_location, auth_value, twofa_value):
+    """Close an instance using the hardClose parameter with full location string"""
+    try:
+        # Construct the URL for closing instance using the full location
+        url = f"https://api.vrchat.cloud/api/1/instances/{full_location}"
+        # Prepare cookies
+        cookies = {"auth": auth_value}
+        if twofa_value:
+            cookies["twoFactorAuth"] = twofa_value
+        # Make the DELETE request with hardClose=true
+        response = requests.delete(
+            url,
+            params={"hardClose": "true"},
+            cookies=cookies,
+            headers={"User-Agent": "PythonAgeGateMonitor/1.0v ComfyChloe:GithubPublic-1.0"}
+        )
+        if response.status_code == 200:
+            print(f"Successfully closed instance")
+            return True
+        elif response.status_code == 403:
+            # Check if it's already closed
+            try:
+                response_data = response.json() if response.headers.get('content-type', '').startswith('application/json') else {}
+                error_message = response_data.get('error', {}).get('message', '')
+                if 'already closed' in error_message.lower():
+                    print(f"Instance already closed (skipping)")
+                    return True  # Treat as success since our goal is achieved
+                else:
+                    print(f"Permission denied: {error_message}")
+                    return False
+            except:
+                print(f"Permission denied (403): {response.text}")
+                return False
+        else:
+            print(f"Failed to close instance: Status {response.status_code}")
+            print(f"Response: {response.text}")
+            return False
+    except Exception as e:
+        print(f"Error closing instance {full_location}: {str(e)}")
+        return False
 def main():
     # Load existing configuration and credentials
-    print("VRChat Group Viewer")
-    print("==================")
+    print("VRChat AgeGate Instance Monitor & Auto-Closer")
+    print("=============================================")
+    print("This script monitors group instances and automatically closes non-ageGate instances.")
+    print()
     # Check if we have valid stored credentials and config
-    auth_value, twofa_value, last_group_id = load_config()
+    auth_value, twofa_value, last_group_id, total_closed = load_config()
+    
+    # Display total closed instances from previous runs
+    if total_closed > 0:
+        print(f"Total instances closed in previous runs: {total_closed}")
+        print()
     # If we don't have stored auth, prompt for credentials
     if not auth_value:
         print("Please enter your VRChat credentials:")
@@ -145,7 +196,7 @@ def main():
     # Enter a context with an instance of the API client
     with vrchatapi.ApiClient(configuration) as api_client:
         # Set our User-Agent as per VRChat Usage Policy
-        api_client.user_agent = "PythonGroupViewer/1.0v ComfyChloe:GithubPublic-1.0"
+        api_client.user_agent = "PythonAgeGateMonitor/1.0v ComfyChloe:GithubPublic-1.0"
         # Instantiate instances of API classes
         auth_api = authentication_api.AuthenticationApi(api_client)
         # Set cookies if loaded from previous session
@@ -263,86 +314,67 @@ def main():
             return
         # Prompt for group ID
         group_id = last_group_id if last_group_id else ""
-        custom_group_id = input(f"Enter the group ID (or press Enter to use last: {group_id}): ")
+        custom_group_id = input(f"Enter the group ID to monitor (or press Enter to use last: {group_id}): ")
         if custom_group_id.strip():
             group_id = custom_group_id.strip()
         if not group_id:
             print("No group ID provided. Exiting.")
             return
         # Save config with group ID
-        save_config(auth_value, twofa_value, group_id)
-        print(f"\nViewing group instances for {group_id}")
-        print("Refreshing every 90 seconds. Press Ctrl+C to stop.")
-        print("Displays: Group info + Instance locations with parsed details")
-        print("-" * 70)
-        # Function to fetch and display group instances
-        def fetch_and_display_instances():
+        save_config(auth_value, twofa_value, group_id, total_closed)
+        print(f"\nMonitoring group instances for {group_id}")
+        print("WARNING: This will automatically close non-ageGate instances!")
+        print("Checking every 60 seconds. Press Ctrl+C to stop.")
+        print("=" * 70)
+        # Function to monitor and close non-ageGate instances
+        def monitor_and_close_instances():
+            nonlocal total_closed
             try:
-                # First, get group information
+                # Get group information
                 group_info = groups_api_instance.get_group(group_id=group_id, include_roles=False)
                 group_name = getattr(group_info, 'name', 'Unknown Group')
-                group_member_count = getattr(group_info, 'member_count', 0)
-                group_join_state = getattr(group_info, 'join_state', 'Unknown')
                 # Get group instances
                 instances = groups_api_instance.get_group_instances(group_id=group_id)
-                # Display group information header
                 print(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] Group: {group_name} ({group_id})")
-                print(f"Group Members: {group_member_count} | Join State: {group_join_state}")
                 if not instances:
                     print(f"No instances found for this group.")
                     return True
-                print(f"Found {len(instances)} instance(s):")
-                print("-" * 70)
+                print(f"Found {len(instances)} instance(s) - checking for non-ageGate instances...")
+                closed_count = 0
+                agegate_count = 0
                 for instance in instances:
-                    # Extract instance information
-                    instance_id = getattr(instance, 'instance_id', 'Unknown')
-                    world_name = "Unknown World"
                     # Convert instance to dict to access all fields correctly
                     if hasattr(instance, 'to_dict'):
                         instance_dict = instance.to_dict()
-                        player_count = instance_dict.get('memberCount', instance_dict.get('member_count', 0))
-                        # Extract capacity/max users
-                        capacity = instance_dict.get('capacity', instance_dict.get('maxUsers', instance_dict.get('max_users', 'Unknown')))
-                        # Get location which contains the full world:instance format
-                        location = instance_dict.get('location', instance_id)
+                        location = instance_dict.get('location', '')
                     else:
-                        # Fallback for direct attribute access
-                        player_count = getattr(instance, 'memberCount', getattr(instance, 'member_count', getattr(instance, 'n_users', 0)))
-                        capacity = getattr(instance, 'capacity', getattr(instance, 'maxUsers', getattr(instance, 'max_users', 'Unknown')))
-                        location = getattr(instance, 'location', instance_id)
-                    # Parse the location/instance_id to extract information
-                    age_gate = 'ageGate' in location if location else False
-                    region = 'Unknown'
-                    group_access_type = 'Unknown'
+                        location = getattr(instance, 'location', '')
+                    # Parse the location to check for ageGate
+                    is_agegate = 'ageGate' in location if location else False
+                    # Extract just the world:instance part for display
+                    display_location = location
                     if location and '~' in location:
-                        # Parse the instance ID components
-                        parts = location.split('~')
-                        for part in parts:
-                            if part.startswith('region(') and part.endswith(')'):
-                                region = part[7:-1]  # Extract content between region( and )
-                            elif part.startswith('groupAccessType(') and part.endswith(')'):
-                                group_access_type = part[16:-1]  # Extract content between groupAccessType( and )
-                    # Get world information
-                    if hasattr(instance, 'world'):
-                        world = instance.world
-                        if isinstance(world, dict):
-                            world_name = world.get('name', 'Unknown World')
-                        elif hasattr(world, 'name'):
-                            world_name = world.name
-                    # Format player count with capacity
-                    if capacity and capacity != 'Unknown':
-                        player_display = f"{player_count}/{capacity}"
-                    else:
-                        player_display = str(player_count)
-                    # Display the full location (world:instance format)
-                    print(f"{location}")
-                    # Display parsed information underneath
-                    print(f"  World: {world_name}")
-                    print(f"  Player count: {player_display}")
-                    print(f"  ageGate: {age_gate}")
-                    print(f"  Region: {region}")
-                    print(f"  Group Access Type: {group_access_type}")
-                    print()
+                        display_location = location.split('~')[0]  # Get just world:instance for display
+                    if location:
+                        if is_agegate:
+                            agegate_count += 1
+                            print(f"AgeGate instance (keeping): {display_location}")
+                        else:
+                            print(f"Non-ageGate instance detected: {display_location}")
+                            print(f"Attempting to close with hardClose=true...")
+                            if close_instance_hard(location, auth_value, twofa_value):
+                                closed_count += 1
+                                total_closed += 1
+                                # Success message is already printed by close_instance_hard function
+                            else:
+                                print(f"Failed to close instance")
+                
+                print(f"\nSummary: {agegate_count} ageGate instances kept, {closed_count} non-ageGate instances closed this check")
+                print(f"Total instances closed across all runs: {total_closed}")
+                
+                # Save updated total to config if any instances were closed
+                if closed_count > 0:
+                    save_config(auth_value, twofa_value, group_id, total_closed)
             except ApiException as e:
                 print(f"API error when fetching group/instances: {e}")
                 if e.status == 401:
@@ -352,19 +384,18 @@ def main():
                     print("Group not found. Please check the Group ID.")
                     return False
             except Exception as e:
-                print(f"Unexpected error when fetching group/instances: {e}")
+                print(f"Unexpected error when monitoring instances: {e}")
                 return False
             return True
-        # Main loop
+        # Main monitoring loop
         try:
             while True:
-                if not fetch_and_display_instances():
+                if not monitor_and_close_instances():
                     break
-                
-                print(f"\nWaiting 90 seconds before next refresh...")
-                time.sleep(90)
+                print(f"\nWaiting 60 seconds before next check...")
+                time.sleep(60)
         except KeyboardInterrupt:
-            print("\n\nStopped by user.")
+            print("\n\nMonitoring stopped by user.")
         # Save final config with updated cookies
         try:
             cookie_jar = api_client.rest_client.cookie_jar._cookies["api.vrchat.cloud"]["/"]
@@ -372,7 +403,7 @@ def main():
                 auth_value = cookie_jar["auth"].value
             if "twoFactorAuth" in cookie_jar:
                 twofa_value = cookie_jar["twoFactorAuth"].value
-            save_config(auth_value, twofa_value, group_id)
+            save_config(auth_value, twofa_value, group_id, total_closed)
         except Exception as e:
             print(f"Final cookie save error: {e}")
 if __name__ == "__main__":
