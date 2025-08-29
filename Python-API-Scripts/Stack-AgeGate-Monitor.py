@@ -1,5 +1,5 @@
 # This script will auto close any instances in specified groups that are not ageGated
-# Supports monitoring multiple group monitoring
+# Supports monitoring multiple groups with interactive management (Add/Remove groups while running)
 import vrchatapi
 from vrchatapi.api import authentication_api, groups_api, instances_api
 from vrchatapi.exceptions import UnauthorizedException, ApiException
@@ -12,7 +12,11 @@ import random
 import getpass
 import sys
 import requests
+import threading
 from http.cookiejar import Cookie
+# Import select only on Unix/Linux systems
+if sys.platform != 'win32':
+    import select
 # Configuration file (holds both cookies and config)
 CONFIG_FILE = ".vrchat_agegate_config.json"
 def getpass_asterisk(prompt="Password: "): 
@@ -131,6 +135,116 @@ def load_cookies():
     """Load cookies only (wrapper for backwards compatibility)"""
     auth, twofa, _ = load_config()
     return auth, twofa
+def check_for_input():
+    """Check if there's input available (non-blocking)"""
+    if sys.platform == 'win32':
+        import msvcrt
+        return msvcrt.kbhit()
+    else:
+        # Unix/Linux
+        import select
+        return select.select([sys.stdin], [], [], 0) == ([sys.stdin], [], [])
+def get_single_char():
+    """Get a single character from input"""
+    if sys.platform == 'win32':
+        import msvcrt
+        return msvcrt.getch().decode('utf-8', errors='ignore').lower()
+    else:
+        # Unix/Linux
+        import termios
+        import tty
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+        try:
+            tty.setraw(sys.stdin.fileno())
+            char = sys.stdin.read(1).lower()
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+        return char
+def add_group_interactive(current_groups, groups_api_instance):
+    """Interactive function to add a new group"""
+    print("\n" + "="*50)
+    print("ADD NEW GROUP")
+    print("="*50)
+    while True:
+        new_group_id = input("Enter new group ID to add (or 'cancel' to abort): ").strip()
+        
+        if new_group_id.lower() == 'cancel':
+            print("Add group cancelled.")
+            return current_groups, False
+        if not new_group_id:
+            print("Please enter a valid group ID.")
+            continue
+        if new_group_id in current_groups:
+            print(f"Group {new_group_id} is already being monitored.")
+            continue
+        # Test if the group exists and is accessible
+        try:
+            group_info = groups_api_instance.get_group(group_id=new_group_id, include_roles=False)
+            group_name = getattr(group_info, 'name', 'Unknown Group')
+            current_groups.append(new_group_id)
+            print(f"Successfully added group: {group_name} ({new_group_id})")
+            print(f"Now monitoring {len(current_groups)} groups: {', '.join(current_groups)}")
+            return current_groups, True
+        except ApiException as e:
+            if e.status == 404:
+                print(f"Group {new_group_id} not found. Please check the Group ID.")
+            elif e.status == 403:
+                print(f"Access denied to group {new_group_id}. You may not have permission.")
+            else:
+                print(f"Error accessing group {new_group_id}: {e}")
+            continue
+        except Exception as e:
+            print(f"Unexpected error: {e}")
+            continue
+def remove_group_interactive(current_groups, groups_api_instance):
+    """Interactive function to remove a group"""
+    print("\n" + "="*50)
+    print("REMOVE GROUP")
+    print("="*50)
+    if len(current_groups) <= 1:
+        print("Cannot remove group - at least one group must be monitored.")
+        return current_groups, False
+    print("Current groups being monitored:")
+    # Fetch group names for better display
+    group_info_list = []
+    for i, group_id in enumerate(current_groups, 1):
+        try:
+            group_info = groups_api_instance.get_group(group_id=group_id, include_roles=False)
+            group_name = getattr(group_info, 'name', 'Unknown Group')
+            group_info_list.append((group_id, group_name))
+            print(f"  {i}. {group_name} ({group_id})")
+        except ApiException as e:
+            if e.status == 404:
+                group_info_list.append((group_id, "Group Not Found"))
+                print(f"  {i}. Group Not Found ({group_id})")
+            elif e.status == 403:
+                group_info_list.append((group_id, "Access Denied"))
+                print(f"  {i}. Access Denied ({group_id})")
+            else:
+                group_info_list.append((group_id, "Error Loading"))
+                print(f"  {i}. Error Loading ({group_id})")
+        except Exception as e:
+            group_info_list.append((group_id, "Unknown Error"))
+            print(f"  {i}. Unknown Error ({group_id})")
+    while True:
+        choice = input("\nEnter group number to remove (or 'cancel' to abort): ").strip()
+        if choice.lower() == 'cancel':
+            print("Remove group cancelled.")
+            return current_groups, False
+        try:
+            choice_num = int(choice)
+            if 1 <= choice_num <= len(current_groups):
+                removed_group = current_groups.pop(choice_num - 1)
+                removed_group_name = group_info_list[choice_num - 1][1]
+                print(f"Removed group: {removed_group_name} ({removed_group})")
+                print(f"Now monitoring {len(current_groups)} groups: {', '.join(current_groups)}")
+                return current_groups, True
+            else:
+                print(f"Please enter a number between 1 and {len(current_groups)}.")
+        except ValueError:
+            print("Please enter a valid number.")
+            continue
 def close_instance_hard(full_location, auth_value, twofa_value):
     """Close an instance using the hardClose parameter with full location string"""
     try:
@@ -323,16 +437,13 @@ def main():
         print("You can monitor multiple groups. Enter group IDs one by one.")
         print("Type 'done' when finished, or press Enter to use previously saved groups.")
         print()
-        
         # Start with last saved groups if available
         group_ids = last_group_ids.copy() if last_group_ids else []
-        
         if group_ids:
             print(f"Previously saved groups: {', '.join(group_ids)}")
             use_saved = input("Use these groups? (y/n, or press Enter for yes): ").strip().lower()
             if use_saved and use_saved not in ['y', 'yes', '']:
                 group_ids = []
-        
         if not group_ids:
             print("Enter group IDs to monitor:")
             while True:
@@ -341,9 +452,7 @@ def main():
                     prompt = f"Current groups: [{current_list}]\nEnter another group ID (or 'done' to finish): "
                 else:
                     prompt = "Enter group ID (or 'done' if finished): "
-                
                 user_input = input(prompt).strip()
-                
                 if user_input.lower() == 'done':
                     break
                 elif user_input:
@@ -354,46 +463,36 @@ def main():
                         print(f"Group {user_input} already in list.")
                 elif not group_ids:
                     print("Please enter at least one group ID or type 'done'.")
-        
         if not group_ids:
             print("No group IDs provided. Exiting.")
             return
-        
         # Save config with group IDs
         save_config(auth_value, twofa_value, group_ids, total_closed)
-        
         print(f"\nMonitoring {len(group_ids)} group(s): {', '.join(group_ids)}")
-        print("⚠️  WARNING: This will automatically close non-ageGate instances!")
+        print("WARNING: This will automatically close non-ageGate instances!")
         print("Checking every 60 seconds. Press Ctrl+C to stop.")
+        print("While running: Press 'A' to add a group, 'R' to remove a group")
         print("=" * 70)
         # Function to monitor and close non-ageGate instances across multiple groups
-        def monitor_and_close_instances():
+        def monitor_and_close_instances(current_group_ids):
             nonlocal total_closed
             overall_closed_count = 0
             overall_agegate_count = 0
-            
-            print(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] Checking {len(group_ids)} group(s)...")
-            
-            for group_id in group_ids:
+            print(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] Checking {len(current_group_ids)} group(s)...")
+            for group_id in current_group_ids:
                 try:
                     # Get group information
                     group_info = groups_api_instance.get_group(group_id=group_id, include_roles=False)
                     group_name = getattr(group_info, 'name', 'Unknown Group')
-                    
                     # Get group instances
                     instances = groups_api_instance.get_group_instances(group_id=group_id)
-                    
-                    print(f"\n📋 Group: {group_name} ({group_id})")
-                    
+                    print(f"\nGroup: {group_name} ({group_id})")
                     if not instances:
-                        print(f"   No instances found.")
+                        print(f"No instances found.")
                         continue
-                    
-                    print(f"   Found {len(instances)} instance(s) - checking for non-ageGate instances...")
-                    
+                    print(f"Found {len(instances)} instance(s) - checking for non-ageGate instances...")
                     group_closed_count = 0
                     group_agegate_count = 0
-                    
                     for instance in instances:
                         # Convert instance to dict to access all fields correctly
                         if hasattr(instance, 'to_dict'):
@@ -401,37 +500,30 @@ def main():
                             location = instance_dict.get('location', '')
                         else:
                             location = getattr(instance, 'location', '')
-                        
                         # Parse the location to check for ageGate
                         is_agegate = 'ageGate' in location if location else False
-                        
                         # Extract just the world:instance part for display
                         display_location = location
                         if location and '~' in location:
                             display_location = location.split('~')[0]  # Get just world:instance for display
-                        
                         if location:
                             if is_agegate:
                                 group_agegate_count += 1
-                                print(f"   ✅ AgeGate instance (keeping): {display_location}")
+                                print(f"AgeGate instance (keeping): {display_location}")
                             else:
-                                print(f"   ⚠️  Non-ageGate instance detected: {display_location}")
-                                print(f"   🔨 Attempting to close with hardClose=true...")
-                                
+                                print(f"Non-ageGate instance detected: {display_location}")
+                                print(f"Attempting to close with hardClose=true...")
                                 if close_instance_hard(location, auth_value, twofa_value):
                                     group_closed_count += 1
                                     total_closed += 1
-                                    print(f"   ✅ Closed successfully")
+                                    print(f"Closed successfully")
                                 else:
-                                    print(f"   ❌ Failed to close instance")
-                    
+                                    print(f"Failed to close instance")
                     overall_closed_count += group_closed_count
                     overall_agegate_count += group_agegate_count
-                    
-                    print(f"   📊 Group Summary: {group_agegate_count} ageGate kept, {group_closed_count} non-ageGate closed")
-                    
+                    print(f"Group Summary: {group_agegate_count} ageGate kept, {group_closed_count} non-ageGate closed")
                 except ApiException as e:
-                    print(f"   ❌ API error for group {group_id}: {e}")
+                    print(f"API error for group {group_id}: {e}")
                     if e.status == 401:
                         print("Authentication expired. Please restart the script.")
                         return False
@@ -440,24 +532,46 @@ def main():
                         # Continue with other groups instead of stopping
                         continue
                 except Exception as e:
-                    print(f"   ❌ Unexpected error for group {group_id}: {e}")
+                    print(f"Unexpected error for group {group_id}: {e}")
                     continue
-            
-            print(f"\n🎯 Overall Summary: {overall_agegate_count} ageGate instances kept, {overall_closed_count} non-ageGate instances closed this check")
-            print(f"📈 Total instances closed across all runs: {total_closed}")
-            
+            print(f"\nOverall Summary: {overall_agegate_count} ageGate instances kept, {overall_closed_count} non-ageGate instances closed this check")
+            print(f"Total instances closed across all runs: {total_closed}")
             # Save updated total to config if any instances were closed
             if overall_closed_count > 0:
-                save_config(auth_value, twofa_value, group_ids, total_closed)
-            
+                save_config(auth_value, twofa_value, current_group_ids, total_closed)
             return True
         # Main monitoring loop
         try:
             while True:
-                if not monitor_and_close_instances():
+                # Run the monitoring check
+                if not monitor_and_close_instances(group_ids):
                     break
                 print(f"\nWaiting 60 seconds before next check...")
-                time.sleep(60)
+                print(f"Press 'A' to add group, 'R' to remove group, Ctrl+C to stop")
+                # Wait 60 seconds but check for input every second
+                for i in range(60):
+                    time.sleep(1)
+                    # Check for user input
+                    if check_for_input():
+                        if char == 'a':
+                            print(f"\nPausing monitoring for group management...")
+                            new_groups, changed = add_group_interactive(group_ids, groups_api_instance)
+                            if changed:
+                                group_ids = new_groups
+                                save_config(auth_value, twofa_value, group_ids, total_closed)
+                            print(f"Resuming monitoring...")
+                            print(f"Continuing wait... ({60-i-1} seconds remaining)")
+                        elif char == 'r':
+                            print(f"\nPausing monitoring for group management...")
+                            new_groups, changed = remove_group_interactive(group_ids, groups_api_instance)
+                            if changed:
+                                group_ids = new_groups
+                                save_config(auth_value, twofa_value, group_ids, total_closed)
+                            print(f"Resuming monitoring...")
+                            print(f"Continuing wait... ({60-i-1} seconds remaining)")
+                        # Clear any remaining input
+                        while check_for_input():
+                            get_single_char()
         except KeyboardInterrupt:
             print("\n\nMonitoring stopped by user.")
         # Save final config with updated cookies
