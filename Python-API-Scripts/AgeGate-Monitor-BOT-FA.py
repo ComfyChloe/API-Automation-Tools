@@ -444,11 +444,19 @@ def get_pending_group_invites(auth_value, twofa_value):
                     group_id = link.replace('group:', '')
                 
                 if notification_id and group_id:
+                    # Try multiple fields for the inviter name
+                    manager_name = (notif_data.get('managerDisplayName') or 
+                                  notif_data.get('managerName') or 
+                                  notif_data.get('inviterDisplayName') or
+                                  notif_data.get('inviterName') or
+                                  notification.get('senderUsername') or
+                                  'Unknown User')
+                    
                     group_invites.append({
                         'notification_id': notification_id,
                         'group_id': group_id,
                         'group_name': notif_data.get('groupName', 'Unknown Group'),
-                        'manager_name': notif_data.get('managerDisplayName', 'Unknown User'),
+                        'manager_name': manager_name,
                         'created_at': notification.get('created_at', '')
                     })
         
@@ -1256,7 +1264,7 @@ def main():
                 for invite in pending_invites_display:
                     print(f"  • {invite['group_name']} - invited by {invite['manager_name']}")
                 if not auto_accept_enabled:
-                    print("  Auto-accept is OFF. Use 'M' to manually accept or 'T' to enable auto-accept.")
+                    print("  Auto-accept is OFF. Press 'P' to pause and use 'M' to manually accept or 'T' to enable auto-accept.")
             
             # Display unmonitored groups alert
             if unmonitored_groups:
@@ -1265,7 +1273,7 @@ def main():
                     print(f"  • {group_name} ({member_count} members) - {group_id}")
                 if len(unmonitored_groups) > 5:
                     print(f"  ... and {len(unmonitored_groups) - 5} more unmonitored groups")
-                print("  (Use 'A' command to add groups to monitoring)")
+                print("  (Press 'P' to pause and use 'A' command to add groups to monitoring)")
             
             print(f"\nOverall Summary:")
             print(f"  Instances: {overall_agegate_count} ageGate kept, {overall_closed_count} non-ageGate closed")
