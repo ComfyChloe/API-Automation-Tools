@@ -1,11 +1,11 @@
 # VRChat Automatic Group Invite Accepter
 # Author: ComfyChloe
-# Version: 1.2
+# Version: 1.3
 #
 # DESCRIPTION:
 # This script continuously monitors your VRChat account for incoming group invites
-# and automatically accepts them. It's useful for users who want to join groups
-# without manually checking and accepting invites.
+# with both automatic and manual control options. Perfect for users who want flexible
+# group invite management.
 #
 # FEATURES:
 # - Automatic authentication with saved credentials
@@ -13,8 +13,30 @@
 # - Real-time monitoring every 60 seconds
 # - Displays current group memberships
 # - Tracks total accepted invites across sessions
+# - Clean console output with status indicators
 # - Logs all accepted invites to group_invites_accepted.log
-
+# - Manual controls for accept/reject during monitoring
+# - Toggle automatic acceptance on/off
+#
+# CONTROLS DURING MONITORING:
+# - A = Toggle automatic acceptance (ON/OFF)
+# - M = Manual accept invites (numbered selection)
+# - R = Manual reject invites (numbered selection)
+# - Ctrl+C = Stop monitoring
+#
+# USAGE:
+# 1. Run the script
+# 2. Enter your VRChat credentials (saved after first login)
+# 3. Complete 2FA if required
+# 4. Script will monitor and show pending invites
+# 5. Use keyboard controls for manual management
+# 6. Press Ctrl+C to stop
+#
+# REQUIREMENTS:
+# - vrchatapi library
+# - requests library
+# - Valid VRChat account
+#
 # NOTE: This script only accepts GROUP INVITES sent to you by others,
 # not group join requests made by others to groups you manage.
 
@@ -34,6 +56,8 @@ from http.cookiejar import Cookie
 # Import select only on Unix/Linux systems
 if sys.platform != 'win32':
     import select
+else:
+    import msvcrt
 
 # Configuration file for storing authentication cookies and statistics
 CONFIG_FILE = ".vrchat_groupaccepter_config.json"
@@ -308,6 +332,269 @@ def accept_group_invite_via_response(notification_id, group_id, auth_value, twof
         print(f"⚠ Error accepting group invite: {str(e)}")
         return False
 
+def reject_group_invite_via_response(notification_id, group_id, auth_value, twofa_value):
+    """
+    Reject a group invite using the VRChat notification response system.
+    
+    Args:
+        notification_id: ID of the group invite notification
+        group_id: ID of the group being invited to
+        auth_value: Authentication cookie value
+        twofa_value: Two-factor authentication cookie value
+        
+    Returns:
+        bool: True if invite was successfully rejected, False otherwise
+    """
+    try:
+        # Construct the URL for responding to the notification
+        url = f"https://api.vrchat.cloud/api/1/notifications/{notification_id}/respond"
+        
+        # Prepare authentication cookies
+        cookies = {"auth": auth_value}
+        if twofa_value:
+            cookies["twoFactorAuth"] = twofa_value
+        
+        # Prepare request body for rejecting the group invite
+        body = {
+            "responseType": "decline",
+            "responseData": group_id
+        }
+        
+        # Make the POST request to reject the invite
+        response = requests.post(
+            url,
+            json=body,
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": "PythonGroupAccepter/1.0v ComfyChloe:GithubPublic-1.0"
+            },
+            cookies=cookies
+        )
+        
+        if response.status_code == 200:
+            return True
+        elif response.status_code == 404:
+            print(f"⚠ Group invite notification not found (may have been already processed)")
+            return False
+        elif response.status_code == 403:
+            print(f"⚠ Permission denied - may not have permissions to respond to notification")
+            return False
+        else:
+            print(f"⚠ Failed to reject group invite: Status {response.status_code}")
+            return False
+    except Exception as e:
+        print(f"⚠ Error rejecting group invite: {str(e)}")
+        return False
+
+def get_pending_group_invites(auth_value, twofa_value):
+    """
+    Get all pending group invite notifications.
+    
+    Args:
+        auth_value: Authentication cookie value
+        twofa_value: Two-factor authentication cookie value
+        
+    Returns:
+        list: List of group invite notifications with details
+    """
+    try:
+        # Use VRChat's v2 notifications API to get recent notifications
+        url = f"https://api.vrchat.cloud/api/1/notifications"
+        cookies = {"auth": auth_value}
+        if twofa_value:
+            cookies["twoFactorAuth"] = twofa_value
+        
+        response = requests.get(
+            url,
+            params={"n": 50},  # Get more notifications to ensure we catch all invites
+            headers={"User-Agent": "PythonGroupAccepter/1.0v ComfyChloe:GithubPublic-1.0"},
+            cookies=cookies
+        )
+        
+        notifications = []
+        if response.status_code == 200:
+            notifications = response.json()
+        
+        # Filter for group invite notifications
+        group_invites = []
+        for notification in notifications:
+            notif_type = notification.get('type', '')
+            if notif_type == 'group.invite':
+                notif_data = notification.get('data', {})
+                notification_id = notification.get('id', '')
+                link = notification.get('link', '')
+                
+                # Extract group ID from the notification link
+                group_id = None
+                if link and link.startswith('group:'):
+                    group_id = link.split('group:')[1]
+                
+                if notification_id and group_id:
+                    group_name = notif_data.get('groupName', 'Unknown Group')
+                    manager_name = notif_data.get('managerUserDisplayName', 'Unknown Manager')
+                    
+                    group_invites.append({
+                        'notification_id': notification_id,
+                        'group_id': group_id,
+                        'group_name': group_name,
+                        'manager_name': manager_name,
+                        'notification': notification
+                    })
+        
+        return group_invites
+        
+    except Exception as e:
+        print(f"⚠ Error getting pending group invites: {e}")
+        return []
+
+def manual_accept_invites_interactive(auth_value, twofa_value):
+    """
+    Interactive function to manually accept group invites.
+    """
+    print("\n" + "="*60)
+    print("MANUAL ACCEPT GROUP INVITES")
+    print("="*60)
+    
+    # Get pending invites
+    pending_invites = get_pending_group_invites(auth_value, twofa_value)
+    
+    if not pending_invites:
+        print("No pending group invites found.")
+        return 0
+    
+    print(f"Found {len(pending_invites)} pending group invite(s):")
+    print()
+    
+    # Display numbered list of invites
+    for i, invite in enumerate(pending_invites, 1):
+        print(f"  {i}. {invite['group_name']} ({invite['group_id']}) - invited by {invite['manager_name']}")
+    
+    print()
+    print("Enter number(s) to accept (e.g., '1', '1,3,5', or 'all')")
+    print("Press Enter or 'cancel' to abort")
+    
+    while True:
+        choice = input("Selection: ").strip().lower()
+        
+        if choice in ['', 'cancel']:
+            print("Manual accept cancelled.")
+            return 0
+        
+        if choice == 'all':
+            selected_indices = list(range(len(pending_invites)))
+        else:
+            try:
+                # Parse comma-separated numbers
+                selected_indices = []
+                for num_str in choice.split(','):
+                    num = int(num_str.strip())
+                    if 1 <= num <= len(pending_invites):
+                        selected_indices.append(num - 1)  # Convert to 0-based index
+                    else:
+                        print(f"Number {num} is out of range (1-{len(pending_invites)})")
+                        continue
+                
+                if not selected_indices:
+                    print("No valid selections. Please try again.")
+                    continue
+                    
+            except ValueError:
+                print("Invalid input. Please enter numbers separated by commas.")
+                continue
+        
+        # Accept selected invites
+        accepted_count = 0
+        for idx in selected_indices:
+            invite = pending_invites[idx]
+            print(f"Accepting invite to {invite['group_name']}...")
+            
+            if accept_group_invite_via_response(invite['notification_id'], invite['group_id'], auth_value, twofa_value):
+                accepted_count += 1
+                print(f"✓ Successfully accepted invite to {invite['group_name']}")
+                
+                # Log the acceptance
+                try:
+                    group_details = get_group_details(invite['group_id'], auth_value, twofa_value)
+                    member_count = group_details.get('memberCount', 'Unknown') if group_details else 'Unknown'
+                    log_accepted_group_invite(invite['group_name'], invite['group_id'], invite['manager_name'], member_count)
+                except:
+                    log_accepted_group_invite(invite['group_name'], invite['group_id'], invite['manager_name'], 'Unknown')
+            else:
+                print(f"✗ Failed to accept invite to {invite['group_name']}")
+        
+        print(f"\nManual accept complete: {accepted_count}/{len(selected_indices)} invites accepted.")
+        return accepted_count
+
+def manual_reject_invites_interactive(auth_value, twofa_value):
+    """
+    Interactive function to manually reject group invites.
+    """
+    print("\n" + "="*60)
+    print("MANUAL REJECT GROUP INVITES")
+    print("="*60)
+    
+    # Get pending invites
+    pending_invites = get_pending_group_invites(auth_value, twofa_value)
+    
+    if not pending_invites:
+        print("No pending group invites found.")
+        return 0
+    
+    print(f"Found {len(pending_invites)} pending group invite(s):")
+    print()
+    
+    # Display numbered list of invites
+    for i, invite in enumerate(pending_invites, 1):
+        print(f"  {i}. {invite['group_name']} ({invite['group_id']}) - invited by {invite['manager_name']}")
+    
+    print()
+    print("Enter number(s) to reject (e.g., '1', '1,3,5', or 'all')")
+    print("Press Enter or 'cancel' to abort")
+    
+    while True:
+        choice = input("Selection: ").strip().lower()
+        
+        if choice in ['', 'cancel']:
+            print("Manual reject cancelled.")
+            return 0
+        
+        if choice == 'all':
+            selected_indices = list(range(len(pending_invites)))
+        else:
+            try:
+                # Parse comma-separated numbers
+                selected_indices = []
+                for num_str in choice.split(','):
+                    num = int(num_str.strip())
+                    if 1 <= num <= len(pending_invites):
+                        selected_indices.append(num - 1)  # Convert to 0-based index
+                    else:
+                        print(f"Number {num} is out of range (1-{len(pending_invites)})")
+                        continue
+                
+                if not selected_indices:
+                    print("No valid selections. Please try again.")
+                    continue
+                    
+            except ValueError:
+                print("Invalid input. Please enter numbers separated by commas.")
+                continue
+        
+        # Reject selected invites
+        rejected_count = 0
+        for idx in selected_indices:
+            invite = pending_invites[idx]
+            print(f"Rejecting invite to {invite['group_name']}...")
+            
+            if reject_group_invite_via_response(invite['notification_id'], invite['group_id'], auth_value, twofa_value):
+                rejected_count += 1
+                print(f"✓ Successfully rejected invite to {invite['group_name']}")
+            else:
+                print(f"✗ Failed to reject invite to {invite['group_name']}")
+        
+        print(f"\nManual reject complete: {rejected_count}/{len(selected_indices)} invites rejected.")
+        return rejected_count
+
 def log_accepted_group_invite(group_name, group_id, inviter_name, member_count):
     """
     Log an accepted group invite to the log file with timestamp and details.
@@ -538,24 +825,35 @@ def main():
             print(f"Failed to authenticate: {e}")
             return
         
-        print("\nStarting automatic group invite accepter...")
+        print("\nStarting group invite monitor with manual controls...")
         print("Monitoring for new group invites every 60 seconds.")
         print("Will also display current group memberships during each check.")
-        print("Press Ctrl+C to stop.")
+        print()
+        print("CONTROLS:")
+        print("  A = Toggle automatic acceptance (ON/OFF)")
+        print("  M = Manual accept invites") 
+        print("  R = Manual reject invites")
+        print("  Ctrl+C = Stop")
         print("=" * 70)
         
-        # Function to monitor and accept group invites
-        def monitor_and_accept_invites():
+        # Auto-accept toggle state
+        auto_accept_enabled = False
+        print(f"Automatic acceptance: {'ENABLED' if auto_accept_enabled else 'DISABLED'}")
+        
+        # Function to monitor and handle group invites
+        def monitor_and_handle_invites():
             """
             Main monitoring function that:
             1. Displays current group memberships
-            2. Scans for new group invite notifications
-            3. Automatically accepts any found invites
+            2. Scans for new group invite notifications  
+            3. Shows pending invites in a tight list
+            4. Automatically accepts if auto-accept is enabled
             """
-            nonlocal total_accepted
+            nonlocal total_accepted, auto_accept_enabled
             accepted_count = 0
             
             print(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] Checking for group invites...")
+            print(f"Auto-accept: {'ON' if auto_accept_enabled else 'OFF'}")
             
             # Display current group memberships for status awareness
             print("Fetching current group memberships...")
@@ -583,116 +881,52 @@ def main():
                 print(f"Error fetching group memberships: {e}")
                 print()
             
-            # Scan for new group invite notifications
-            print("Scanning for new group invites...")
+            # Get pending group invites
+            print("Scanning for pending group invites...")
             
             try:
-                # Use VRChat's v2 notifications API to get recent notifications
-                url = f"https://api.vrchat.cloud/api/1/notifications"
-                cookies = {"auth": auth_value}
-                if twofa_value:
-                    cookies["twoFactorAuth"] = twofa_value
+                pending_invites = get_pending_group_invites(auth_value, twofa_value)
                 
-                response = requests.get(
-                    url,
-                    params={"n": 20},  # Get last 20 notifications
-                    headers={"User-Agent": "PythonGroupAccepter/1.0v ComfyChloe:GithubPublic-1.0"},
-                    cookies=cookies
-                )
-                
-                notifications = []
-                if response.status_code == 200:
-                    notifications = response.json()
-                
-                if not notifications:
-                    print("No notifications found.")
+                if not pending_invites:
+                    print("No pending group invites found.")
                     return True
                 
-                print(f"Found {len(notifications)} notification(s) - scanning for group invites...")
+                # Display pending invites in tight list format
+                print(f"PENDING INVITES ({len(pending_invites)}):")
+                for i, invite in enumerate(pending_invites, 1):
+                    print(f"  {i}. {invite['group_name']} ({invite['group_id']}) - by {invite['manager_name']}")
+                print()
                 
-                # Count notification types for summary
-                notification_types = set(notif.get('type', 'unknown') for notif in notifications)
-                group_invite_count = sum(1 for notif in notifications if notif.get('type') == 'group.invite')
-                
-                if group_invite_count > 0:
-                    print(f"Found {group_invite_count} group invite notification(s)")
-                else:
-                    print("No group invite notifications found")
-                
-                # Process each notification to find and accept group invites
-                for notification in notifications:
-                    try:
-                        notif_type = notification.get('type', '')
+                # Auto-accept if enabled
+                if auto_accept_enabled:
+                    print(f"Auto-accepting {len(pending_invites)} pending invite(s)...")
+                    
+                    for invite in pending_invites:
+                        print(f"Accepting invite to {invite['group_name']}...")
                         
-                        # Only process group invite notifications
-                        if notif_type == 'group.invite':
-                            notif_data = notification.get('data', {})
-                            notification_id = notification.get('id', '')
-                            link = notification.get('link', '')
+                        if accept_group_invite_via_response(invite['notification_id'], invite['group_id'], auth_value, twofa_value):
+                            accepted_count += 1
+                            total_accepted += 1
                             
-                            # Extract group ID from the notification link (format: "group:grp_...")
-                            group_id = None
-                            if link and link.startswith('group:'):
-                                group_id = link.split('group:')[1]
+                            # Get group details and log
+                            try:
+                                group_details = get_group_details(invite['group_id'], auth_value, twofa_value)
+                                member_count = group_details.get('memberCount', 'Unknown') if group_details else 'Unknown'
+                                official_group_name = group_details.get('name', invite['group_name']) if group_details else invite['group_name']
+                                log_accepted_group_invite(official_group_name, invite['group_id'], invite['manager_name'], member_count)
+                            except:
+                                log_accepted_group_invite(invite['group_name'], invite['group_id'], invite['manager_name'], 'Unknown')
                             
-                            if notification_id and group_id:
-                                group_name = notif_data.get('groupName', 'Unknown Group')
-                                manager_name = notif_data.get('managerUserDisplayName', 'Unknown Manager')
-                                print(f"Found group invite to '{group_name}' from {manager_name}")
-                                
-                                # Accept the group invite using the notification response system
-                                print(f"Accepting group invite...")
-                                if accept_group_invite_via_response(notification_id, group_id, auth_value, twofa_value):
-                                    accepted_count += 1
-                                    total_accepted += 1
-                                    
-                                    # Get group details directly to get accurate member count
-                                    try:
-                                        group_details = get_group_details(group_id, auth_value, twofa_value)
-                                        
-                                        if group_details:
-                                            member_count = group_details.get('memberCount', 'Unknown')
-                                            # Update group name with the official name if different
-                                            official_group_name = group_details.get('name', group_name)
-                                        else:
-                                            member_count = "Unknown"
-                                            official_group_name = group_name
-                                        
-                                        # Log the successful acceptance with accurate details
-                                        log_accepted_group_invite(official_group_name, group_id, manager_name, member_count)
-                                        
-                                    except Exception as log_error:
-                                        # If we can't get group details, log with basic info
-                                        log_accepted_group_invite(group_name, group_id, manager_name, "Unknown")
-                                        print(f"⚠ Could not fetch group details for logging: {log_error}")
-                                    
-                                    print(f"✓ Successfully accepted invite to {group_name}")
-                                else:
-                                    print(f"✗ Failed to accept invite to {group_name}")
-                            else:
-                                print(f"⚠ Group invite notification missing required data")
+                            print(f"✓ Successfully accepted invite to {invite['group_name']}")
+                        else:
+                            print(f"✗ Failed to accept invite to {invite['group_name']}")
                     
-                    except Exception as e:
-                        print(f"Error processing notification: {e}")
-                        continue
-                
-                # Summary of this check
-                if accepted_count > 0:
-                    print(f"\n✓ Accepted {accepted_count} group invite(s) this check.")
-                    print(f"Total group invites accepted: {total_accepted}")
-                    
-                    # Update group membership display after accepting invites
-                    try:
-                        user_groups = get_user_groups(current_user_id, auth_value, twofa_value)
-                        group_count = len(user_groups) if user_groups else 0
-                        print(f"Current status: Member of {group_count} group(s)")
-                    except:
-                        pass
-                    
-                    # Save updated total to config
-                    save_config(auth_value, twofa_value, total_accepted)
+                    if accepted_count > 0:
+                        print(f"\n✓ Auto-accepted {accepted_count} group invite(s) this check.")
+                        print(f"Total group invites accepted: {total_accepted}")
+                        save_config(auth_value, twofa_value, total_accepted)
                 else:
-                    print("No new group invites to accept.")
+                    print("Auto-accept is DISABLED. Use 'M' to manually accept, 'R' to manually reject, or 'A' to enable auto-accept.")
                 
                 return True
                 
@@ -704,20 +938,43 @@ def main():
         try:
             while True:
                 # Run the monitoring check for new group invites
-                if not monitor_and_accept_invites():
+                if not monitor_and_handle_invites():
                     break
                 
                 # Wait 60 seconds before next check
                 print(f"\nWaiting 60 seconds before next check...")
-                print(f"Press Ctrl+C to stop")
+                print(f"Press A=Auto-toggle, M=Manual accept, R=Manual reject, Ctrl+C=Stop")
                 
-                # Wait 60 seconds but check for input every second to allow clean exit
+                # Wait 60 seconds but check for input every second to allow controls
                 for i in range(60):
                     time.sleep(1)
-                    # Clear any input to avoid buildup
+                    
+                    # Check for user input
                     if check_for_input():
-                        get_single_char()
+                        char = get_single_char()
                         
+                        if char == 'a':
+                            auto_accept_enabled = not auto_accept_enabled
+                            status = "ENABLED" if auto_accept_enabled else "DISABLED"
+                            print(f"\n🔄 Automatic acceptance {status}")
+                            print(f"Continuing wait... ({60-i-1} seconds remaining)")
+                        elif char == 'm':
+                            print(f"\n📝 Opening manual accept interface...")
+                            manual_accepted = manual_accept_invites_interactive(auth_value, twofa_value)
+                            if manual_accepted > 0:
+                                total_accepted += manual_accepted
+                                save_config(auth_value, twofa_value, total_accepted)
+                                print(f"Updated total accepted invites: {total_accepted}")
+                            print(f"Resuming monitoring... ({60-i-1} seconds remaining)")
+                        elif char == 'r':
+                            print(f"\n❌ Opening manual reject interface...")
+                            manual_reject_invites_interactive(auth_value, twofa_value)
+                            print(f"Resuming monitoring... ({60-i-1} seconds remaining)")
+                        
+                        # Clear any remaining input to avoid buildup
+                        while check_for_input():
+                            get_single_char()
+                            
         except KeyboardInterrupt:
             print("\n\nMonitoring stopped by user.")
         
