@@ -385,7 +385,7 @@ def close_instance_hard(full_location, auth_value, twofa_value):
                 error_message = response_data.get('error', {}).get('message', '')
                 if 'already closed' in error_message.lower():
                     print(f"Instance already closed (skipping)")
-                    return True, instance_info  # Treat as success since our goal is achieved
+                    return False, None  # Return False since no closing action was performed
                 else:
                     print(f"Permission denied: {error_message}")
                     return False, None
