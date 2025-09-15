@@ -26,6 +26,8 @@ else:
 CONFIG_FILE = ".vrchat_agegate_config.json"
 # Log file for recording accepted group invites
 LOG_FILE = "group_invites_accepted.log"
+# Log file for recording closed instances
+INSTANCES_LOG_FILE = "instances_closed.log"
 def getpass_asterisk(prompt="Password: "): 
     """Get password input with asterisk masking"""
     print(prompt, end='', flush=True)
@@ -171,18 +173,110 @@ def add_group_interactive(current_groups, groups_api_instance):
     print("\n" + "="*50)
     print("ADD NEW GROUP")
     print("="*50)
-    while True:
-        new_group_id = input("Enter new group ID to add (or 'cancel' to abort): ").strip()
+    
+    # Get current user's groups to show available options
+    try:
+        # Get the current user ID from the API client context
+        # We'll need to get this from the main function, but for now let's try to get it
+        auth_api = authentication_api.AuthenticationApi(groups_api_instance.api_client)
+        current_user = auth_api.get_current_user()
+        current_user_id = current_user.id
         
-        if new_group_id.lower() == 'cancel':
+        # Extract auth values from cookies
+        cookie_jar = groups_api_instance.api_client.rest_client.cookie_jar._cookies.get("api.vrchat.cloud", {}).get("/", {})
+        auth_value = cookie_jar.get("auth", {}).value if cookie_jar.get("auth") else None
+        twofa_value = cookie_jar.get("twoFactorAuth", {}).value if cookie_jar.get("twoFactorAuth") else None
+        
+        if auth_value:
+            user_groups = get_user_groups(current_user_id, auth_value, twofa_value)
+            available_groups = []
+            
+            for group in user_groups:
+                # Get the actual group ID from the group object, not the membership ID
+                group_id = group.get('group', {}).get('id', '') if isinstance(group.get('group'), dict) else group.get('groupId', '')
+                if group_id and group_id not in current_groups:
+                    group_name = group.get('group', {}).get('name', 'Unknown Group') if isinstance(group.get('group'), dict) else group.get('name', 'Unknown Group')
+                    member_count = group.get('group', {}).get('memberCount', 'Unknown') if isinstance(group.get('group'), dict) else group.get('memberCount', 'Unknown')
+                    available_groups.append((group_name, group_id, member_count))
+            
+            if available_groups:
+                print(f"You are a member of {len(available_groups)} groups that are NOT currently monitored:")
+                for i, (group_name, group_id, member_count) in enumerate(available_groups[:10], 1):
+                    print(f"  {i}. {group_name} ({member_count} members) - {group_id}")
+                if len(available_groups) > 10:
+                    print(f"  ... and {len(available_groups) - 10} more groups")
+                print("\nYou can enter a number from the list above, multiple numbers separated by commas (e.g., '1,3,5'), or manually enter a group ID.")
+                print()
+    except Exception as e:
+        print(f"⚠ Could not fetch your group memberships: {e}")
+        available_groups = []
+    
+    while True:
+        if available_groups:
+            new_group_input = input("Enter group number(s) from list above (e.g., '1' or '1,3,5'), group ID, or 'cancel' to abort: ").strip()
+        else:
+            new_group_input = input("Enter new group ID to add (or 'cancel' to abort): ").strip()
+        
+        if new_group_input.lower() == 'cancel':
             print("Add group cancelled.")
             return current_groups, False
-        if not new_group_id:
-            print("Please enter a valid group ID.")
+            
+        if not new_group_input:
+            print("Please enter a valid input.")
             continue
+        
+        # Check if input is a number (selecting from available groups)
+        new_group_id = None
+        if available_groups and new_group_input.isdigit():
+            selection = int(new_group_input)
+            if 1 <= selection <= len(available_groups):
+                new_group_id = available_groups[selection - 1][1]  # Get group ID
+                print(f"Selected: {available_groups[selection - 1][0]} ({new_group_id})")
+            else:
+                print(f"Please enter a number between 1 and {len(available_groups)}, or enter a group ID directly.")
+                continue
+        elif available_groups and ',' in new_group_input:
+            # Handle multiple selections
+            try:
+                selections = [int(x.strip()) for x in new_group_input.split(',')]
+                added_groups = []
+                for selection in selections:
+                    if 1 <= selection <= len(available_groups):
+                        group_to_add = available_groups[selection - 1][1]  # Get group ID
+                        if group_to_add not in current_groups:
+                            try:
+                                group_info = groups_api_instance.get_group(group_id=group_to_add, include_roles=False)
+                                group_name = getattr(group_info, 'name', 'Unknown Group')
+                                current_groups.append(group_to_add)
+                                added_groups.append(f"{group_name} ({group_to_add})")
+                                print(f"✓ Successfully added group: {group_name} ({group_to_add})")
+                            except ApiException as e:
+                                print(f"✗ Error adding group {group_to_add}: {e}")
+                            except Exception as e:
+                                print(f"✗ Unexpected error adding group {group_to_add}: {e}")
+                        else:
+                            print(f"Group {group_to_add} is already being monitored.")
+                    else:
+                        print(f"Invalid selection: {selection}")
+                
+                if added_groups:
+                    print(f"\nSuccessfully added {len(added_groups)} group(s)")
+                    print(f"Now monitoring {len(current_groups)} groups: {', '.join(current_groups)}")
+                    return current_groups, True
+                else:
+                    print("No groups were added.")
+                    continue
+            except ValueError:
+                print("Invalid input for multiple selections. Use format like '1,2,3'")
+                continue
+        else:
+            # Treat as direct group ID input
+            new_group_id = new_group_input
+        
         if new_group_id in current_groups:
             print(f"Group {new_group_id} is already being monitored.")
             continue
+        
         # Test if the group exists and is accessible
         try:
             group_info = groups_api_instance.get_group(group_id=new_group_id, include_roles=False)
@@ -259,6 +353,20 @@ def close_instance_hard(full_location, auth_value, twofa_value):
         cookies = {"auth": auth_value}
         if twofa_value:
             cookies["twoFactorAuth"] = twofa_value
+        
+        # First, try to get instance info before closing for logging purposes
+        instance_info = None
+        try:
+            info_response = requests.get(
+                url,
+                cookies=cookies,
+                headers={"User-Agent": "PythonAgeGateMonitor/1.0v ComfyChloe:GithubPublic-1.0"}
+            )
+            if info_response.status_code == 200:
+                instance_info = info_response.json()
+        except:
+            pass  # Continue without instance info if we can't get it
+        
         # Make the DELETE request with hardClose=true
         response = requests.delete(
             url,
@@ -268,7 +376,8 @@ def close_instance_hard(full_location, auth_value, twofa_value):
         )
         if response.status_code == 200:
             print(f"Successfully closed instance")
-            return True
+            # Return success with instance info for logging
+            return True, instance_info
         elif response.status_code == 403:
             # Check if it's already closed
             try:
@@ -276,20 +385,20 @@ def close_instance_hard(full_location, auth_value, twofa_value):
                 error_message = response_data.get('error', {}).get('message', '')
                 if 'already closed' in error_message.lower():
                     print(f"Instance already closed (skipping)")
-                    return True  # Treat as success since our goal is achieved
+                    return True, instance_info  # Treat as success since our goal is achieved
                 else:
                     print(f"Permission denied: {error_message}")
-                    return False
+                    return False, None
             except:
                 print(f"Permission denied (403): {response.text}")
-                return False
+                return False, None
         else:
             print(f"Failed to close instance: Status {response.status_code}")
             print(f"Response: {response.text}")
-            return False
+            return False, None
     except Exception as e:
         print(f"Error closing instance {full_location}: {str(e)}")
-        return False
+        return False, None
 
 def get_pending_group_invites(auth_value, twofa_value):
     """
@@ -520,6 +629,42 @@ def log_accepted_group_invite(group_name, group_id, inviter_name, member_count):
             
     except Exception as e:
         print(f"⚠ Error writing to log file: {e}")
+
+def log_closed_instance(group_name, group_id, instance_location, player_count=None, world_name=None):
+    """
+    Log a closed instance to the log file with timestamp and details.
+    
+    Args:
+        group_name: Name of the group the instance belonged to
+        group_id: ID of the group the instance belonged to
+        instance_location: Full location string of the closed instance
+        player_count: Number of players in the instance (if available)
+        world_name: Name of the world (if available)
+    """
+    try:
+        # Get current timestamp
+        timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+        
+        # Extract world ID from location if world_name not provided
+        display_world = world_name or "Unknown World"
+        if not world_name and instance_location:
+            # Extract world ID from location (format: wrld_xxx:instanceId~options)
+            if ':' in instance_location:
+                world_id = instance_location.split(':')[0]
+                display_world = world_id
+        
+        # Format player count
+        player_info = f"Players: {player_count}" if player_count is not None else "Players: Unknown"
+        
+        # Format the log entry with clear labels
+        log_entry = f"Date: {timestamp} | Group: {group_name} | ID: {group_id} | World: {display_world} | Location: {instance_location} | {player_info}\n"
+        
+        # Append to log file
+        with open(INSTANCES_LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(log_entry)
+            
+    except Exception as e:
+        print(f"⚠ Error writing to instances log file: {e}")
 
 def get_group_details(group_id, auth_value, twofa_value):
     """
@@ -963,12 +1108,41 @@ def main():
                 user_groups = get_user_groups(current_user_id, auth_value, twofa_value)
                 if user_groups:
                     print(f"Currently a member of {len(user_groups)} group(s):")
-                    for group in user_groups[:5]:  # Show first 5 groups
-                        group_name = group.get('name', 'Unknown Group')
-                        member_count = group.get('memberCount', 'Unknown')
-                        print(f"  • {group_name} ({member_count} members)")
-                    if len(user_groups) > 5:
-                        print(f"  ... and {len(user_groups) - 5} more groups")
+                    
+                    # Separate groups into monitored and unmonitored
+                    monitored_groups = []
+                    unmonitored_groups = []
+                    
+                    for group in user_groups:
+                        # Get the actual group ID from the group object, not the membership ID
+                        group_id = group.get('group', {}).get('id', '') if isinstance(group.get('group'), dict) else group.get('groupId', '')
+                        group_name = group.get('group', {}).get('name', 'Unknown Group') if isinstance(group.get('group'), dict) else group.get('name', 'Unknown Group')
+                        member_count = group.get('group', {}).get('memberCount', 'Unknown') if isinstance(group.get('group'), dict) else group.get('memberCount', 'Unknown')
+                        
+                        if group_id in current_group_ids:
+                            monitored_groups.append((group_name, group_id, member_count))
+                        else:
+                            unmonitored_groups.append((group_name, group_id, member_count))
+                    
+                    # Display monitored groups
+                    if monitored_groups:
+                        print(f"  ✓ Groups being monitored ({len(monitored_groups)}):")
+                        for group_name, group_id, member_count in monitored_groups[:5]:
+                            print(f"    • {group_name} ({member_count} members) - {group_id}")
+                        if len(monitored_groups) > 5:
+                            print(f"    ... and {len(monitored_groups) - 5} more monitored groups")
+                    
+                    # Display unmonitored groups
+                    if unmonitored_groups:
+                        print(f"  ⚠ Groups NOT being monitored ({len(unmonitored_groups)}):")
+                        for group_name, group_id, member_count in unmonitored_groups[:10]:  # Show more unmonitored groups
+                            print(f"    • {group_name} ({member_count} members) - {group_id}")
+                        if len(unmonitored_groups) > 10:
+                            print(f"    ... and {len(unmonitored_groups) - 10} more unmonitored groups")
+                        print("    (Use 'A' command to add groups to monitoring)")
+                    else:
+                        print("  ✓ All groups are being monitored!")
+                        
                 else:
                     print("Not currently a member of any groups.")
             except Exception as e:
@@ -1011,10 +1185,25 @@ def main():
                             else:
                                 print(f"Non-ageGate instance detected: {display_location}")
                                 print(f"Attempting to close with hardClose=true...")
-                                if close_instance_hard(location, auth_value, twofa_value):
+                                success, instance_info = close_instance_hard(location, auth_value, twofa_value)
+                                if success:
                                     group_closed_count += 1
                                     total_closed += 1
                                     print(f"Closed successfully")
+                                    
+                                    # Log the closed instance
+                                    try:
+                                        player_count = None
+                                        world_name = None
+                                        
+                                        # Extract info from instance_info if available
+                                        if instance_info:
+                                            player_count = instance_info.get('n_users', instance_info.get('userCount'))
+                                            world_name = instance_info.get('world', {}).get('name') if isinstance(instance_info.get('world'), dict) else None
+                                        
+                                        log_closed_instance(group_name, group_id, location, player_count, world_name)
+                                    except Exception as log_error:
+                                        print(f"⚠ Error logging closed instance: {log_error}")
                                 else:
                                     print(f"Failed to close instance")
                     overall_closed_count += group_closed_count
