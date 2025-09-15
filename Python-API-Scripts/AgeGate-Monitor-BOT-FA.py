@@ -848,6 +848,80 @@ def manual_reject_invites_interactive(auth_value, twofa_value):
         
         print(f"\nManual reject complete: {rejected_count}/{len(selected_indices)} invites rejected.")
         return rejected_count
+
+def pause_script(current_user, group_ids, total_closed, total_accepted, auto_accept_enabled, groups_api_instance, auth_value, twofa_value):
+    """Function to handle pause functionality with interactive menu"""
+    print("\n" + "="*50)
+    print("SCRIPT PAUSED - INTERACTIVE MENU")
+    print("="*50)
+    
+    while True:
+        print("\nAvailable commands while paused:")
+        print("  A = add group to monitor")
+        print("  R = remove group from monitoring")
+        print("  T = toggle group invite auto-acceptance (ON/OFF)")
+        print("  M = manual accept group invites")
+        print("  J = manual reject group invites")
+        print("  S = show current status")
+        print("  H = show this help menu")
+        print("  Q = quit/exit script")
+        print("  ENTER/SPACE = resume monitoring")
+        
+        choice = input("\nEnter command: ").strip().lower()
+        
+        if choice in ['', ' ']:  # Enter or Space to resume
+            print("Resuming monitoring...")
+            return {'action': 'resume'}
+            
+        elif choice == 'a':
+            new_groups, changed = add_group_interactive(group_ids, groups_api_instance)
+            if changed:
+                return {'action': 'update_groups', 'group_ids': new_groups}
+            
+        elif choice == 'r':
+            new_groups, changed = remove_group_interactive(group_ids, groups_api_instance)
+            if changed:
+                return {'action': 'update_groups', 'group_ids': new_groups}
+                
+        elif choice == 't':
+            new_auto_accept = not auto_accept_enabled
+            print(f"Group invite auto-accept: {'ENABLED' if new_auto_accept else 'DISABLED'}")
+            return {'action': 'toggle_auto_accept', 'auto_accept_enabled': new_auto_accept}
+            
+        elif choice == 'm':
+            print("\nPausing monitoring for manual invite management...")
+            accepted = manual_accept_invites_interactive(auth_value, twofa_value)
+            if accepted > 0:
+                return {'action': 'update_accepted', 'accepted_count': accepted}
+            
+        elif choice == 'j':
+            print("\nPausing monitoring for manual invite management...")
+            manual_reject_invites_interactive(auth_value, twofa_value)
+            
+        elif choice == 's':
+            print("\n" + "="*40)
+            print("CURRENT STATUS")
+            print("="*40)
+            print(f"Logged in as: {current_user.display_name}")
+            print(f"Monitoring {len(group_ids)} group(s): {', '.join(group_ids)}")
+            print(f"Auto-accept invites: {'ENABLED' if auto_accept_enabled else 'DISABLED'}")
+            print(f"Total instances closed: {total_closed}")
+            print(f"Total invites accepted: {total_accepted}")
+            
+        elif choice == 'h':
+            continue  # Show menu again
+            
+        elif choice == 'q':
+            confirm = input("Are you sure you want to quit? (y/N): ").strip().lower()
+            if confirm in ['y', 'yes']:
+                return {'action': 'quit'}
+            else:
+                print("Cancelled.")
+                
+        else:
+            print(f"Unknown command: '{choice}'. Type 'H' for help.")
+            
+    return {'action': 'resume'}
 def main():
     # Load existing configuration and credentials
     print("VRChat AgeGate Instance Monitor & Auto-Closer + Group Invite Manager")
@@ -1048,11 +1122,9 @@ def main():
         print("Checking every 60 seconds. Press Ctrl+C to stop.")
         print()
         print("CONTROLS:")
-        print("  A = Add group to monitor")
-        print("  R = Remove group from monitoring")
-        print("  T = Toggle group invite auto-acceptance (ON/OFF)")
-        print("  M = Manual accept group invites")
-        print("  J = Manual reject group invites")
+        print("  P = pause script (interactive menu)")
+        print("  H = show help/pause menu")
+        print("  T = toggle group invite auto-acceptance (ON/OFF)")
         print("  Ctrl+C = Stop")
         print(f"Group invite auto-accept: {'ENABLED' if auto_accept_enabled else 'DISABLED'}")
         print("=" * 70)
@@ -1237,46 +1309,37 @@ def main():
                 if not monitor_and_close_instances(group_ids):
                     break
                 print(f"\nWaiting 60 seconds before next check...")
-                print(f"Press: A=Add group, R=Remove group, T=Toggle auto-accept, M=Manual accept, J=Manual reject, Ctrl+C=Stop")
+                print(f"Press: P=Pause, H=Help, T=Toggle auto-accept, Ctrl+C=Stop")
+                
                 # Wait 60 seconds but check for input every second
                 for i in range(60):
                     time.sleep(1)
                     # Check for user input
                     if check_for_input():
                         char = get_single_char()
-                        if char == 'a':
-                            print(f"\nPausing monitoring for group management...")
-                            new_groups, changed = add_group_interactive(group_ids, groups_api_instance)
-                            if changed:
-                                group_ids = new_groups
+                        if char in ['p', 'h']:
+                            print(f"\nPausing monitoring...")
+                            result = pause_script(current_user, group_ids, total_closed, total_accepted, auto_accept_enabled, groups_api_instance, auth_value, twofa_value)
+                            
+                            if result['action'] == 'quit':
+                                print("Exiting script...")
+                                return
+                            elif result['action'] == 'update_groups':
+                                group_ids = result['group_ids']
                                 save_config(auth_value, twofa_value, group_ids, total_closed, total_accepted, auto_accept_enabled)
-                            print(f"Resuming monitoring...")
-                            print(f"Continuing wait... ({60-i-1} seconds remaining)")
-                        elif char == 'r':
-                            print(f"\nPausing monitoring for group management...")
-                            new_groups, changed = remove_group_interactive(group_ids, groups_api_instance)
-                            if changed:
-                                group_ids = new_groups
+                            elif result['action'] == 'toggle_auto_accept':
+                                auto_accept_enabled = result['auto_accept_enabled']
                                 save_config(auth_value, twofa_value, group_ids, total_closed, total_accepted, auto_accept_enabled)
+                            elif result['action'] == 'update_accepted':
+                                total_accepted += result['accepted_count']
+                                save_config(auth_value, twofa_value, group_ids, total_closed, total_accepted, auto_accept_enabled)
+                            
                             print(f"Resuming monitoring...")
                             print(f"Continuing wait... ({60-i-1} seconds remaining)")
                         elif char == 't':
                             auto_accept_enabled = not auto_accept_enabled
                             save_config(auth_value, twofa_value, group_ids, total_closed, total_accepted, auto_accept_enabled)
                             print(f"\nGroup invite auto-accept: {'ENABLED' if auto_accept_enabled else 'DISABLED'}")
-                            print(f"Continuing wait... ({60-i-1} seconds remaining)")
-                        elif char == 'm':
-                            print(f"\nPausing monitoring for manual invite management...")
-                            accepted = manual_accept_invites_interactive(auth_value, twofa_value)
-                            if accepted > 0:
-                                total_accepted += accepted
-                                save_config(auth_value, twofa_value, group_ids, total_closed, total_accepted, auto_accept_enabled)
-                            print(f"Resuming monitoring...")
-                            print(f"Continuing wait... ({60-i-1} seconds remaining)")
-                        elif char == 'j':
-                            print(f"\nPausing monitoring for manual invite management...")
-                            manual_reject_invites_interactive(auth_value, twofa_value)
-                            print(f"Resuming monitoring...")
                             print(f"Continuing wait... ({60-i-1} seconds remaining)")
                         # Clear any remaining input
                         while check_for_input():
