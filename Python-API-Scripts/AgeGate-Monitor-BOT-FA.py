@@ -1133,110 +1133,45 @@ def main():
             nonlocal total_closed, total_accepted, auto_accept_enabled
             overall_closed_count = 0
             overall_agegate_count = 0
-            accepted_count = 0
+            initial_accepted = total_accepted
             
             print(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] Checking {len(current_group_ids)} group(s)...")
             print(f"Auto-accept invites: {'ON' if auto_accept_enabled else 'OFF'}")
             
-            # Check for group invites first
-            print("Scanning for pending group invites...")
+            # Handle auto-accept of group invites silently
             try:
                 pending_invites = get_pending_group_invites(auth_value, twofa_value)
                 
-                if pending_invites:
-                    print(f"Found {len(pending_invites)} pending group invite(s):")
+                if pending_invites and auto_accept_enabled:
                     for invite in pending_invites:
-                        print(f"  • {invite['group_name']} - invited by {invite['manager_name']}")
-                    
-                    if auto_accept_enabled:
-                        print("Auto-accept is enabled, accepting all invites...")
-                        for invite in pending_invites:
-                            print(f"Accepting invite to {invite['group_name']}...")
-                            if accept_group_invite_via_response(invite['notification_id'], invite['group_id'], auth_value, twofa_value):
-                                accepted_count += 1
-                                total_accepted += 1
-                                print(f"✓ Successfully accepted invite to {invite['group_name']}")
-                                
-                                # Log the acceptance
-                                try:
-                                    group_details = get_group_details(invite['group_id'], auth_value, twofa_value)
-                                    member_count = group_details.get('memberCount', 'Unknown') if group_details else 'Unknown'
-                                    log_accepted_group_invite(invite['group_name'], invite['group_id'], invite['manager_name'], member_count)
-                                except:
-                                    pass
-                            else:
-                                print(f"✗ Failed to accept invite to {invite['group_name']}")
-                    else:
-                        print("Auto-accept is disabled. Use 'M' to manually accept or 'T' to enable auto-accept.")
-                else:
-                    print("No pending group invites found.")
+                        if accept_group_invite_via_response(invite['notification_id'], invite['group_id'], auth_value, twofa_value):
+                            total_accepted += 1
+                            # Log the acceptance
+                            try:
+                                group_details = get_group_details(invite['group_id'], auth_value, twofa_value)
+                                member_count = group_details.get('memberCount', 'Unknown') if group_details else 'Unknown'
+                                log_accepted_group_invite(invite['group_name'], invite['group_id'], invite['manager_name'], member_count)
+                            except:
+                                pass
                     
             except Exception as e:
                 print(f"⚠ Error checking group invites: {e}")
             
-            # Display current group memberships for status awareness
-            print("Fetching current group memberships...")
-            try:
-                user_groups = get_user_groups(current_user_id, auth_value, twofa_value)
-                if user_groups:
-                    print(f"Currently a member of {len(user_groups)} group(s):")
-                    
-                    # Separate groups into monitored and unmonitored
-                    monitored_groups = []
-                    unmonitored_groups = []
-                    
-                    for group in user_groups:
-                        # Get the actual group ID from the group object, not the membership ID
-                        group_id = group.get('group', {}).get('id', '') if isinstance(group.get('group'), dict) else group.get('groupId', '')
-                        group_name = group.get('group', {}).get('name', 'Unknown Group') if isinstance(group.get('group'), dict) else group.get('name', 'Unknown Group')
-                        member_count = group.get('group', {}).get('memberCount', 'Unknown') if isinstance(group.get('group'), dict) else group.get('memberCount', 'Unknown')
-                        
-                        if group_id in current_group_ids:
-                            monitored_groups.append((group_name, group_id, member_count))
-                        else:
-                            unmonitored_groups.append((group_name, group_id, member_count))
-                    
-                    # Display monitored groups
-                    if monitored_groups:
-                        print(f"  ✓ Groups being monitored ({len(monitored_groups)}):")
-                        for group_name, group_id, member_count in monitored_groups[:5]:
-                            print(f"    • {group_name} ({member_count} members) - {group_id}")
-                        if len(monitored_groups) > 5:
-                            print(f"    ... and {len(monitored_groups) - 5} more monitored groups")
-                    
-                    # Display unmonitored groups
-                    if unmonitored_groups:
-                        print(f"  ⚠ Groups NOT being monitored ({len(unmonitored_groups)}):")
-                        for group_name, group_id, member_count in unmonitored_groups[:10]:  # Show more unmonitored groups
-                            print(f"    • {group_name} ({member_count} members) - {group_id}")
-                        if len(unmonitored_groups) > 10:
-                            print(f"    ... and {len(unmonitored_groups) - 10} more unmonitored groups")
-                        print("    (Use 'A' command to add groups to monitoring)")
-                    else:
-                        print("  ✓ All groups are being monitored!")
-                        
-                else:
-                    print("Not currently a member of any groups.")
-            except Exception as e:
-                print(f"⚠ Error getting group memberships: {e}")
-            
-            # Now check group instances for age gate monitoring
-            print(f"\nChecking instances in monitored groups...")
-            
-            for group_id in current_group_ids:
+            # Check group instances for age gate monitoring with concise output
+            for i, group_id in enumerate(current_group_ids, 1):
                 try:
                     # Get group information
                     group_info = groups_api_instance.get_group(group_id=group_id, include_roles=False)
                     group_name = getattr(group_info, 'name', 'Unknown Group')
                     # Get group instances
                     instances = groups_api_instance.get_group_instances(group_id=group_id)
-                    print(f"\nGroup: {group_name} ({group_id})")
+                    
                     if not instances:
-                        print(f"No instances found.")
                         continue
-                    print(f"Found {len(instances)} instance(s) - checking for non-ageGate instances...")
+                        
                     group_closed_count = 0
                     group_agegate_count = 0
+                    
                     for instance in instances:
                         # Convert instance to dict to access all fields correctly
                         if hasattr(instance, 'to_dict'):
@@ -1246,22 +1181,21 @@ def main():
                             location = getattr(instance, 'location', '')
                         # Parse the location to check for ageGate
                         is_agegate = 'ageGate' in location if location else False
-                        # Extract just the world:instance part for display
-                        display_location = location
-                        if location and '~' in location:
-                            display_location = location.split('~')[0]  # Get just world:instance for display
+                        
                         if location:
                             if is_agegate:
                                 group_agegate_count += 1
-                                print(f"AgeGate instance (keeping): {display_location}")
                             else:
-                                print(f"Non-ageGate instance detected: {display_location}")
-                                print(f"Attempting to close with hardClose=true...")
+                                # Extract just the world:instance part for display
+                                display_location = location
+                                if location and '~' in location:
+                                    display_location = location.split('~')[0]  # Get just world:instance for display
+                                
+                                print(f"Group {i} ({group_name}) - Closing non-ageGate: {display_location}")
                                 success, instance_info = close_instance_hard(location, auth_value, twofa_value)
                                 if success:
                                     group_closed_count += 1
                                     total_closed += 1
-                                    print(f"Closed successfully")
                                     
                                     # Log the closed instance
                                     try:
@@ -1276,30 +1210,69 @@ def main():
                                         log_closed_instance(group_name, group_id, location, player_count, world_name)
                                     except Exception as log_error:
                                         print(f"⚠ Error logging closed instance: {log_error}")
-                                else:
-                                    print(f"Failed to close instance")
+                                        
                     overall_closed_count += group_closed_count
                     overall_agegate_count += group_agegate_count
-                    print(f"Group Summary: {group_agegate_count} ageGate kept, {group_closed_count} non-ageGate closed")
+                    
                 except ApiException as e:
-                    print(f"API error for group {group_id}: {e}")
                     if e.status == 401:
                         print("Authentication expired. Please restart the script.")
                         return False
                     elif e.status == 404:
-                        print(f"Group {group_id} not found. Please check the Group ID.")
+                        print(f"Group {i} not found: {group_id}")
                         # Continue with other groups instead of stopping
                         continue
                 except Exception as e:
-                    print(f"Unexpected error for group {group_id}: {e}")
+                    print(f"Error checking group {i}: {e}")
                     continue
+            
+            # Get current group memberships for unmonitored group alerts
+            unmonitored_groups = []
+            try:
+                user_groups = get_user_groups(current_user_id, auth_value, twofa_value)
+                if user_groups:
+                    for group in user_groups:
+                        # Get the actual group ID from the group object, not the membership ID
+                        group_id = group.get('group', {}).get('id', '') if isinstance(group.get('group'), dict) else group.get('groupId', '')
+                        group_name = group.get('group', {}).get('name', 'Unknown Group') if isinstance(group.get('group'), dict) else group.get('name', 'Unknown Group')
+                        member_count = group.get('group', {}).get('memberCount', 'Unknown') if isinstance(group.get('group'), dict) else group.get('memberCount', 'Unknown')
+                        
+                        if group_id and group_id not in current_group_ids:
+                            unmonitored_groups.append((group_name, group_id, member_count))
+                            
+            except Exception as e:
+                print(f"⚠ Error getting group memberships: {e}")
+            
+            # Check for pending invites to display at end
+            pending_invites_display = []
+            try:
+                pending_invites_display = get_pending_group_invites(auth_value, twofa_value)
+            except Exception as e:
+                print(f"⚠ Error checking pending invites: {e}")
+            
+            # Display pending invites alert
+            if pending_invites_display:
+                print(f"\n⚠ PENDING GROUP INVITES ({len(pending_invites_display)}):")
+                for invite in pending_invites_display:
+                    print(f"  • {invite['group_name']} - invited by {invite['manager_name']}")
+                if not auto_accept_enabled:
+                    print("  Auto-accept is OFF. Use 'M' to manually accept or 'T' to enable auto-accept.")
+            
+            # Display unmonitored groups alert
+            if unmonitored_groups:
+                print(f"\n⚠ UNMONITORED GROUPS ({len(unmonitored_groups)}):")
+                for group_name, group_id, member_count in unmonitored_groups[:5]:
+                    print(f"  • {group_name} ({member_count} members) - {group_id}")
+                if len(unmonitored_groups) > 5:
+                    print(f"  ... and {len(unmonitored_groups) - 5} more unmonitored groups")
+                print("  (Use 'A' command to add groups to monitoring)")
+            
             print(f"\nOverall Summary:")
             print(f"  Instances: {overall_agegate_count} ageGate kept, {overall_closed_count} non-ageGate closed")
-            print(f"  Group Invites: {accepted_count} accepted this check")
             print(f"  Total instances closed across all runs: {total_closed}")
             print(f"  Total invites accepted across all runs: {total_accepted}")
-            # Save updated totals to config if any instances were closed or invites accepted
-            if overall_closed_count > 0 or accepted_count > 0:
+            # Save updated totals to config if any instances were closed or invites were accepted
+            if overall_closed_count > 0 or total_accepted > initial_accepted:
                 save_config(auth_value, twofa_value, current_group_ids, total_closed, total_accepted, auto_accept_enabled)
             return True
         # Main monitoring loop
