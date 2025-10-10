@@ -857,6 +857,147 @@ def manual_reject_invites_interactive(auth_value, twofa_value):
         print(f"\nManual reject complete: {rejected_count}/{len(selected_indices)} invites rejected.")
         return rejected_count
 
+def manual_close_instances_interactive(group_ids, groups_api_instance, auth_value, twofa_value):
+    """
+    Interactive function to manually close instances from monitored groups.
+    """
+    print("\n" + "="*60)
+    print("MANUAL INSTANCE CLOSING")
+    print("="*60)
+    
+    # Get all instances from monitored groups
+    all_instances = []
+    
+    for group_id in group_ids:
+        try:
+            # Get group information
+            group_info = groups_api_instance.get_group(group_id=group_id, include_roles=False)
+            group_name = getattr(group_info, 'name', 'Unknown Group')
+            
+            # Get group instances
+            instances = groups_api_instance.get_group_instances(group_id=group_id)
+            
+            if instances:
+                for instance in instances:
+                    # Convert instance to dict to access all fields correctly
+                    if hasattr(instance, 'to_dict'):
+                        instance_dict = instance.to_dict()
+                        location = instance_dict.get('location', '')
+                    else:
+                        location = getattr(instance, 'location', '')
+                    
+                    if location:
+                        # Parse the location to check for ageGate
+                        is_agegate = 'ageGate' in location if location else False
+                        
+                        # Extract world ID from location for display
+                        display_location = location
+                        if location and '~' in location:
+                            display_location = location.split('~')[0]  # Get just world:instance for display
+                        
+                        # Get additional instance info if available
+                        user_count = getattr(instance, 'n_users', getattr(instance, 'userCount', 'Unknown'))
+                        
+                        all_instances.append({
+                            'group_name': group_name,
+                            'group_id': group_id,
+                            'location': location,
+                            'display_location': display_location,
+                            'is_agegate': is_agegate,
+                            'user_count': user_count
+                        })
+                        
+        except Exception as e:
+            print(f"⚠ Error getting instances for group {group_id}: {e}")
+            continue
+    
+    if not all_instances:
+        print("No instances found in any monitored groups.")
+        return 0
+    
+    print(f"Found {len(all_instances)} instance(s) across monitored groups:")
+    print()
+    
+    # Display numbered list of instances
+    for i, instance in enumerate(all_instances, 1):
+        agegate_status = "AgeGate" if instance['is_agegate'] else "Non-AgeGate"
+        user_info = f"({instance['user_count']} users)" if instance['user_count'] != 'Unknown' else "(Unknown users)"
+        print(f"  {i}. [{agegate_status}] {instance['group_name']} - {instance['display_location']} {user_info}")
+    
+    print()
+    print("Enter number(s) to close (e.g., '1', '1,3,5', or 'all')")
+    print("Press Enter or 'cancel' to abort")
+    
+    while True:
+        choice = input("Selection: ").strip().lower()
+        
+        if choice in ['', 'cancel']:
+            print("Manual instance closing cancelled.")
+            return 0
+        
+        if choice == 'all':
+            selected_indices = list(range(len(all_instances)))
+        else:
+            try:
+                # Parse comma-separated numbers
+                selected_indices = []
+                for num_str in choice.split(','):
+                    num = int(num_str.strip()) - 1
+                    if 0 <= num < len(all_instances):
+                        selected_indices.append(num)
+                
+                if not selected_indices:
+                    print("No valid selections. Please try again.")
+                    continue
+                    
+            except ValueError:
+                print("Invalid input. Please enter numbers separated by commas.")
+                continue
+        
+        # Confirm selection if more than 1 instance or if includes ageGate instances
+        agegate_count = sum(1 for idx in selected_indices if all_instances[idx]['is_agegate'])
+        if len(selected_indices) > 1 or agegate_count > 0:
+            confirm_msg = f"You selected {len(selected_indices)} instance(s)"
+            if agegate_count > 0:
+                confirm_msg += f", including {agegate_count} AgeGate instance(s)"
+            confirm_msg += ". Are you sure? (y/N): "
+            
+            confirm = input(confirm_msg).strip().lower()
+            if confirm not in ['y', 'yes']:
+                print("Cancelled.")
+                continue
+        
+        # Close selected instances
+        closed_count = 0
+        for idx in selected_indices:
+            instance = all_instances[idx]
+            agegate_status = "AgeGate" if instance['is_agegate'] else "Non-AgeGate"
+            print(f"Closing {agegate_status} instance: {instance['display_location']} from {instance['group_name']}...")
+            
+            success, instance_info = close_instance_hard(instance['location'], auth_value, twofa_value)
+            if success:
+                closed_count += 1
+                print(f"✓ Successfully closed instance")
+                
+                # Log the closed instance
+                try:
+                    player_count = None
+                    world_name = None
+                    
+                    # Extract info from instance_info if available
+                    if instance_info:
+                        player_count = instance_info.get('n_users', instance_info.get('userCount'))
+                        world_name = instance_info.get('world', {}).get('name') if isinstance(instance_info.get('world'), dict) else None
+                    
+                    log_closed_instance(instance['group_name'], instance['group_id'], instance['location'], player_count, world_name)
+                except Exception as log_error:
+                    print(f"⚠ Error logging closed instance: {log_error}")
+            else:
+                print(f"✗ Failed to close instance")
+        
+        print(f"\nManual close complete: {closed_count}/{len(selected_indices)} instances closed.")
+        return closed_count
+
 def pause_script(current_user, group_ids, total_closed, total_accepted, auto_accept_enabled, groups_api_instance, auth_value, twofa_value):
     """Function to handle pause functionality with interactive menu"""
     print("\n" + "="*50)
@@ -870,6 +1011,7 @@ def pause_script(current_user, group_ids, total_closed, total_accepted, auto_acc
         print("  T = toggle group invite auto-acceptance (ON/OFF)")
         print("  M = manual accept group invites")
         print("  J = manual reject group invites")
+        print("  C = manual close instances")
         print("  S = show current status")
         print("  H = show this help menu")
         print("  Q = quit/exit script")
@@ -905,6 +1047,12 @@ def pause_script(current_user, group_ids, total_closed, total_accepted, auto_acc
         elif choice == 'j':
             print("\nPausing monitoring for manual invite management...")
             manual_reject_invites_interactive(auth_value, twofa_value)
+            
+        elif choice == 'c':
+            print("\nPausing monitoring for manual instance management...")
+            closed = manual_close_instances_interactive(group_ids, groups_api_instance, auth_value, twofa_value)
+            if closed > 0:
+                return {'action': 'update_closed', 'closed_count': closed}
             
         elif choice == 's':
             print("\n" + "="*40)
@@ -1313,6 +1461,9 @@ def main():
                                 save_config(auth_value, twofa_value, group_ids, total_closed, total_accepted, auto_accept_enabled)
                             elif result['action'] == 'update_accepted':
                                 total_accepted += result['accepted_count']
+                                save_config(auth_value, twofa_value, group_ids, total_closed, total_accepted, auto_accept_enabled)
+                            elif result['action'] == 'update_closed':
+                                total_closed += result['closed_count']
                                 save_config(auth_value, twofa_value, group_ids, total_closed, total_accepted, auto_accept_enabled)
                             
                             print(f"Resuming monitoring...")
