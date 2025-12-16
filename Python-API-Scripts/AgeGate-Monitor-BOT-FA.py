@@ -93,7 +93,7 @@ def make_cookie(name, value):
                  False,
                  None,
                  None, {})
-def save_config(auth_value, twofa_value, group_ids=None, total_closed=None, total_accepted=None, auto_accept_enabled=None):
+def save_config(auth_value, twofa_value, group_ids=None, total_closed=None, total_accepted=None, auto_accept_enabled=None, excluded_instance_tags=None):
     """Save both authentication cookies and configuration data to a single file"""
     data = {
         "auth": auth_value,
@@ -107,6 +107,8 @@ def save_config(auth_value, twofa_value, group_ids=None, total_closed=None, tota
         data["total_accepted"] = total_accepted
     if auto_accept_enabled is not None:
         data["auto_accept_enabled"] = auto_accept_enabled
+    if excluded_instance_tags is not None:
+        data["excluded_instance_tags"] = excluded_instance_tags
     # If file exists, load existing data to preserve other settings
     if os.path.exists(CONFIG_FILE):
         try:
@@ -135,11 +137,12 @@ def load_config():
                     group_ids,
                     data.get("total_closed", 0),
                     data.get("total_accepted", 0),
-                    data.get("auto_accept_enabled", False)
+                    data.get("auto_accept_enabled", False),
+                    data.get("excluded_instance_tags", [])
                 )
         except Exception:
             pass
-    return None, None, [], 0, 0, False
+    return None, None, [], 0, 0, False, []
 def save_cookies(auth_value, twofa_value):
     """Save cookies only (wrapper for backwards compatibility)"""
     save_config(auth_value, twofa_value)
@@ -360,7 +363,7 @@ def close_instance_hard(full_location, auth_value, twofa_value):
             info_response = requests.get(
                 url,
                 cookies=cookies,
-                headers={"User-Agent": "PythonAgeGateMonitor/1.0v ComfyChloe:GithubPublic-1.0"}
+                headers={"User-Agent": "PythonAgeGateMonitor/1.0v ComfyChloe:GithubPublic-1.1"}
             )
             if info_response.status_code == 200:
                 instance_info = info_response.json()
@@ -399,6 +402,59 @@ def close_instance_hard(full_location, auth_value, twofa_value):
     except Exception as e:
         print(f"Error closing instance {full_location}: {str(e)}")
         return False, None
+
+def get_instance_name(full_location, auth_value, twofa_value):
+    """
+    Fetch the custom name of an instance from VRChat API.
+    
+    Args:
+        full_location: Full instance location string
+        auth_value: Authentication cookie value
+        twofa_value: Two-factor authentication cookie value
+        
+    Returns:
+        Instance name string or None if unable to fetch
+    """
+    try:
+        url = f"https://api.vrchat.cloud/api/1/instances/{full_location}"
+        cookies = {"auth": auth_value}
+        if twofa_value:
+            cookies["twoFactorAuth"] = twofa_value
+        
+        response = requests.get(
+            url,
+            cookies=cookies,
+            headers={"User-Agent": "PythonAgeGateMonitor/1.0v ComfyChloe:GithubPublic-1.0"}
+        )
+        
+        if response.status_code == 200:
+            instance_data = response.json()
+            return instance_data.get('displayName')
+        return None
+    except Exception as e:
+        print(f"⚠ Error fetching instance name: {e}")
+        return None
+
+def is_instance_excluded(instance_name, excluded_tags):
+    """
+    Check if an instance name contains any of the excluded tags.
+    
+    Args:
+        instance_name: The custom name of the instance
+        excluded_tags: List of tag strings to check for
+        
+    Returns:
+        True if instance should be excluded (not closed), False otherwise
+    """
+    if not instance_name or not excluded_tags:
+        return False
+    
+    # Case-insensitive substring match - check if any tag appears anywhere in the name
+    instance_name_lower = instance_name.lower()
+    for tag in excluded_tags:
+        if tag.lower() in instance_name_lower:
+            return True
+    return False
 
 def get_pending_group_invites(auth_value, twofa_value):
     """
@@ -638,7 +694,7 @@ def log_accepted_group_invite(group_name, group_id, inviter_name, member_count):
     except Exception as e:
         print(f"⚠ Error writing to log file: {e}")
 
-def log_closed_instance(group_name, group_id, instance_location, player_count=None, world_name=None):
+def log_closed_instance(group_name, group_id, instance_location, player_count=None, world_name=None, excluded_reason=None):
     """
     Log a closed instance to the log file with timestamp and details.
     
@@ -648,6 +704,7 @@ def log_closed_instance(group_name, group_id, instance_location, player_count=No
         instance_location: Full location string of the closed instance
         player_count: Number of players in the instance (if available)
         world_name: Name of the world (if available)
+        excluded_reason: Reason for exclusion if instance was not closed (e.g., "Excluded by name tag: N-AV")
     """
     try:
         # Get current timestamp
@@ -665,7 +722,10 @@ def log_closed_instance(group_name, group_id, instance_location, player_count=No
         player_info = f"Players: {player_count}" if player_count is not None else "Players: Unknown"
         
         # Format the log entry with clear labels
-        log_entry = f"Date: {timestamp} | Group: {group_name} | ID: {group_id} | World: {display_world} | Location: {instance_location} | {player_info}\n"
+        if excluded_reason:
+            log_entry = f"Date: {timestamp} | Group: {group_name} | ID: {group_id} | World: {display_world} | Location: {instance_location} | {player_info} | Status: {excluded_reason}\n"
+        else:
+            log_entry = f"Date: {timestamp} | Group: {group_name} | ID: {group_id} | World: {display_world} | Location: {instance_location} | {player_info}\n"
         
         # Append to log file
         with open(INSTANCES_LOG_FILE, "a", encoding="utf-8") as f:
@@ -998,6 +1058,96 @@ def manual_close_instances_interactive(group_ids, groups_api_instance, auth_valu
         print(f"\nManual close complete: {closed_count}/{len(selected_indices)} instances closed.")
         return closed_count
 
+def manage_exclusion_tags_interactive(auth_value, twofa_value):
+    """
+    Interactive function to manage instance name exclusion tags.
+    
+    Returns:
+        tuple: (new_tags_list, changed_boolean)
+    """
+    # Load current config to get existing tags
+    _, _, _, _, _, _, current_tags = load_config()
+    
+    print("\n" + "="*60)
+    print("MANAGE EXCLUDED INSTANCE NAME TAGS")
+    print("="*60)
+    print("\nInstances with these tags in their name will NOT be auto-closed.")
+    print()
+    
+    while True:
+        if current_tags:
+            print("Current excluded tags:")
+            for i, tag in enumerate(current_tags, 1):
+                print(f"  {i}. \"{tag}\"")
+        else:
+            print("No excluded tags configured.")
+        
+        print("\nOptions:")
+        print("  A = add new tag")
+        print("  R = remove tag")
+        print("  C = clear all tags")
+        print("  ENTER = save and return")
+        
+        choice = input("\nEnter command: ").strip().lower()
+        
+        if choice in ['', ' ']:
+            # Save the tags
+            save_config(auth_value, twofa_value, excluded_instance_tags=current_tags)
+            print("Exclusion tags saved.")
+            return current_tags, True
+        
+        elif choice == 'a':
+            print("\nEnter the tag to exclude (will match anywhere in instance name):")
+            print("Example: \"N-AV\" will prevent closing instances like \"Chloe's Instance N-AV\"")
+            new_tag = input("Tag: ").strip()
+            
+            if new_tag:
+                if new_tag not in current_tags:
+                    current_tags.append(new_tag)
+                    print(f"Added tag: \"{new_tag}\"")
+                else:
+                    print(f"Tag \"{new_tag}\" already exists.")
+            else:
+                print("Tag cannot be empty.")
+            print()
+        
+        elif choice == 'r':
+            if not current_tags:
+                print("No tags to remove.")
+                continue
+            
+            print("\nEnter number of tag to remove (or 'cancel'):")
+            remove_choice = input("Selection: ").strip().lower()
+            
+            if remove_choice == 'cancel':
+                continue
+            
+            try:
+                idx = int(remove_choice) - 1
+                if 0 <= idx < len(current_tags):
+                    removed_tag = current_tags.pop(idx)
+                    print(f"Removed tag: \"{removed_tag}\"")
+                else:
+                    print("Invalid selection.")
+            except ValueError:
+                print("Invalid input. Please enter a number.")
+            print()
+        
+        elif choice == 'c':
+            if current_tags:
+                confirm = input(f"Clear all {len(current_tags)} tag(s)? (y/N): ").strip().lower()
+                if confirm in ['y', 'yes']:
+                    current_tags = []
+                    print("All tags cleared.")
+                else:
+                    print("Cancelled.")
+            else:
+                print("No tags to clear.")
+            print()
+        
+        else:
+            print(f"Unknown command: '{choice}'")
+
 def pause_script(current_user, group_ids, total_closed, total_accepted, auto_accept_enabled, groups_api_instance, auth_value, twofa_value):
     """Function to handle pause functionality with interactive menu"""
     print("\n" + "="*50)
@@ -1008,6 +1158,7 @@ def pause_script(current_user, group_ids, total_closed, total_accepted, auto_acc
         print("\nAvailable commands while paused:")
         print("  A = add group to monitor")
         print("  R = remove group from monitoring")
+        print("  E = manage excluded instance name tags")
         print("  T = toggle group invite auto-acceptance (ON/OFF)")
         print("  M = manual accept group invites")
         print("  J = manual reject group invites")
@@ -1032,6 +1183,11 @@ def pause_script(current_user, group_ids, total_closed, total_accepted, auto_acc
             new_groups, changed = remove_group_interactive(group_ids, groups_api_instance)
             if changed:
                 return {'action': 'update_groups', 'group_ids': new_groups}
+                
+        elif choice == 'e':
+            new_tags, changed = manage_exclusion_tags_interactive(auth_value, twofa_value)
+            if changed:
+                return {'action': 'update_exclusion_tags', 'excluded_instance_tags': new_tags}
                 
         elif choice == 't':
             new_auto_accept = not auto_accept_enabled
@@ -1086,7 +1242,7 @@ def main():
     print("It also monitors for group invites with automatic and manual acceptance options.")
     print()
     # Check if we have valid stored credentials and config
-    auth_value, twofa_value, last_group_ids, total_closed, total_accepted, auto_accept_enabled = load_config()
+    auth_value, twofa_value, last_group_ids, total_closed, total_accepted, auto_accept_enabled, excluded_instance_tags = load_config()
     
     # Display total closed instances from previous runs
     if total_closed > 0:
@@ -1270,7 +1426,7 @@ def main():
             print("No group IDs provided. Exiting.")
             return
         # Save config with group IDs
-        save_config(auth_value, twofa_value, group_ids, total_closed, total_accepted, auto_accept_enabled)
+        save_config(auth_value, twofa_value, group_ids, total_closed, total_accepted, auto_accept_enabled, excluded_instance_tags)
         
         print(f"\nMonitoring {len(group_ids)} group(s): {', '.join(group_ids)}")
         print("WARNING: This will automatically close non-ageGate instances!")
@@ -1347,25 +1503,48 @@ def main():
                                 if location and '~' in location:
                                     display_location = location.split('~')[0]  # Get just world:instance for display
                                 
-                                print(f"Group {i} ({group_name}) - Closing non-ageGate: {display_location}")
-                                success, instance_info = close_instance_hard(location, auth_value, twofa_value)
-                                if success:
-                                    group_closed_count += 1
-                                    total_closed += 1
-                                    
-                                    # Log the closed instance
+                                # Check if instance name contains any excluded tags
+                                should_exclude = False
+                                matching_tag = None
+                                if excluded_instance_tags:
+                                    print(f"  Checking instance name for exclusion tags: {excluded_instance_tags}")
+                                    instance_name = get_instance_name(location, auth_value, twofa_value)
+                                    print(f"  Instance name: '{instance_name}'")
+                                    if instance_name and is_instance_excluded(instance_name, excluded_instance_tags):
+                                        should_exclude = True
+                                        # Find which tag matched
+                                        for tag in excluded_instance_tags:
+                                            if tag.lower() in instance_name.lower():
+                                                matching_tag = tag
+                                                break
+                                
+                                if should_exclude:
+                                    print(f"Group {i} ({group_name}) - Skipping excluded instance: {display_location} (name tag: \"{matching_tag}\")")
+                                    # Log the excluded instance
                                     try:
-                                        player_count = None
-                                        world_name = None
-                                        
-                                        # Extract info from instance_info if available
-                                        if instance_info:
-                                            player_count = instance_info.get('n_users', instance_info.get('userCount'))
-                                            world_name = instance_info.get('world', {}).get('name') if isinstance(instance_info.get('world'), dict) else None
-                                        
-                                        log_closed_instance(group_name, group_id, location, player_count, world_name)
+                                        log_closed_instance(group_name, group_id, location, None, None, f"Excluded by name tag: {matching_tag}")
                                     except Exception as log_error:
-                                        print(f"⚠ Error logging closed instance: {log_error}")
+                                        print(f"⚠ Error logging excluded instance: {log_error}")
+                                else:
+                                    print(f"Group {i} ({group_name}) - Closing non-ageGate: {display_location}")
+                                    success, instance_info = close_instance_hard(location, auth_value, twofa_value)
+                                    if success:
+                                        group_closed_count += 1
+                                        total_closed += 1
+                                        
+                                        # Log the closed instance
+                                        try:
+                                            player_count = None
+                                            world_name = None
+                                            
+                                            # Extract info from instance_info if available
+                                            if instance_info:
+                                                player_count = instance_info.get('n_users', instance_info.get('userCount'))
+                                                world_name = instance_info.get('world', {}).get('name') if isinstance(instance_info.get('world'), dict) else None
+                                            
+                                            log_closed_instance(group_name, group_id, location, player_count, world_name)
+                                        except Exception as log_error:
+                                            print(f"⚠ Error logging closed instance: {log_error}")
                                         
                     overall_closed_count += group_closed_count
                     overall_agegate_count += group_agegate_count
@@ -1429,7 +1608,7 @@ def main():
             print(f"  Total invites accepted across all runs: {total_accepted}")
             # Save updated totals to config if any instances were closed or invites were accepted
             if overall_closed_count > 0 or total_accepted > initial_accepted:
-                save_config(auth_value, twofa_value, current_group_ids, total_closed, total_accepted, auto_accept_enabled)
+                save_config(auth_value, twofa_value, current_group_ids, total_closed, total_accepted, auto_accept_enabled, excluded_instance_tags)
             return True
         # Main monitoring loop
         try:
@@ -1455,22 +1634,25 @@ def main():
                                 return
                             elif result['action'] == 'update_groups':
                                 group_ids = result['group_ids']
-                                save_config(auth_value, twofa_value, group_ids, total_closed, total_accepted, auto_accept_enabled)
+                                save_config(auth_value, twofa_value, group_ids, total_closed, total_accepted, auto_accept_enabled, excluded_instance_tags)
+                            elif result['action'] == 'update_exclusion_tags':
+                                excluded_instance_tags = result['excluded_instance_tags']
+                                save_config(auth_value, twofa_value, group_ids, total_closed, total_accepted, auto_accept_enabled, excluded_instance_tags)
                             elif result['action'] == 'toggle_auto_accept':
                                 auto_accept_enabled = result['auto_accept_enabled']
-                                save_config(auth_value, twofa_value, group_ids, total_closed, total_accepted, auto_accept_enabled)
+                                save_config(auth_value, twofa_value, group_ids, total_closed, total_accepted, auto_accept_enabled, excluded_instance_tags)
                             elif result['action'] == 'update_accepted':
                                 total_accepted += result['accepted_count']
-                                save_config(auth_value, twofa_value, group_ids, total_closed, total_accepted, auto_accept_enabled)
+                                save_config(auth_value, twofa_value, group_ids, total_closed, total_accepted, auto_accept_enabled, excluded_instance_tags)
                             elif result['action'] == 'update_closed':
                                 total_closed += result['closed_count']
-                                save_config(auth_value, twofa_value, group_ids, total_closed, total_accepted, auto_accept_enabled)
+                                save_config(auth_value, twofa_value, group_ids, total_closed, total_accepted, auto_accept_enabled, excluded_instance_tags)
                             
                             print(f"Resuming monitoring...")
                             print(f"Continuing wait... ({60-i-1} seconds remaining)")
                         elif char == 't':
                             auto_accept_enabled = not auto_accept_enabled
-                            save_config(auth_value, twofa_value, group_ids, total_closed, total_accepted, auto_accept_enabled)
+                            save_config(auth_value, twofa_value, group_ids, total_closed, total_accepted, auto_accept_enabled, excluded_instance_tags)
                             print(f"\nGroup invite auto-accept: {'ENABLED' if auto_accept_enabled else 'DISABLED'}")
                             print(f"Continuing wait... ({60-i-1} seconds remaining)")
                         # Clear any remaining input
@@ -1485,7 +1667,7 @@ def main():
                 auth_value = cookie_jar["auth"].value
             if "twoFactorAuth" in cookie_jar:
                 twofa_value = cookie_jar["twoFactorAuth"].value
-            save_config(auth_value, twofa_value, group_ids, total_closed, total_accepted, auto_accept_enabled)
+            save_config(auth_value, twofa_value, group_ids, total_closed, total_accepted, auto_accept_enabled, excluded_instance_tags)
         except Exception as e:
             print(f"Final cookie save error: {e}")
 if __name__ == "__main__":
