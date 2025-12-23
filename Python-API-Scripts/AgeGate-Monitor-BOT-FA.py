@@ -1520,11 +1520,6 @@ def main():
                                 
                                 if should_exclude:
                                     print(f"Group {i} ({group_name}) - Skipping excluded instance: {display_location} (name tag: \"{matching_tag}\")")
-                                    # Log the excluded instance
-                                    try:
-                                        log_closed_instance(group_name, group_id, location, None, None, f"Excluded by name tag: {matching_tag}")
-                                    except Exception as log_error:
-                                        print(f"⚠ Error logging excluded instance: {log_error}")
                                 else:
                                     print(f"Group {i} ({group_name}) - Closing non-ageGate: {display_location}")
                                     success, instance_info = close_instance_hard(location, auth_value, twofa_value)
